@@ -34,6 +34,10 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote
 
+# 周次信用残趋势（4W/8W/13W）计算层：本模块只做编排，
+# 实际计算见 weekly.py（独立模块，不引入循环依赖）。
+import weekly
+
 BASE = "https://www.jpx.co.jp"
 INDEX = BASE + "/markets/statistics-equities/margin/01.html"
 PDF_TMPL = BASE + "/markets/statistics-equities/margin/tvdivq0000001rnl-att/{ymd}_mtall.pdf"
@@ -725,6 +729,31 @@ class H(BaseHTTPRequestHandler):
                     payload["ok"] = False
                     payload["jpxError"] = str(e)
             self._send(payload)
+            return
+
+        if u.path in ("/api/weekly", "/weekly"):
+            code = (q.get("code", [""])[0] or "").strip().upper()
+            if not re.fullmatch(r"\d{3,4}[A-Z]?", code):
+                self._send({"ok": False,
+                            "err": "请提供 4 位股票代码（可带字母后缀，如 285A）"}, 400)
+                return
+            fresh = (q.get("fresh", ["0"])[0] or "0").lower() in ("1", "true", "yes")
+            try:
+                # 复用现有 JPX 日次抓取/缓存链，得到日次记录
+                daily_rows, _up = gather(code, UPSTREAM_LIMIT, fresh=fresh)
+            except Exception as e:
+                self._send({"ok": False, "err": f"JPX 日次抓取失败: {e}"}, 500)
+                return
+            try:
+                resp = weekly.build_weekly_response(code, daily_rows, fresh=fresh)
+            except Exception as e:
+                self._send({"ok": False, "err": f"周次计算失败: {e}"}, 500)
+                return
+            resp["ok"] = True
+            resp["source"] = ("JPX 日次信用残（每交易日 16:00）+ Ganan 周次 bootstrap（免费）"
+                              if daily_rows else
+                              "Ganan 周次 bootstrap（JPX 日次暂不可用，仅 Ganan 约10週）")
+            self._send(resp)
             return
 
         if u.path in ("/api/margin", "/margin"):
