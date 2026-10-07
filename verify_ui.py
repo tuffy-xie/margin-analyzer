@@ -102,6 +102,24 @@ def read_state(page):
     } : null""")
 
 
+def read_weekly(page):
+    return page.evaluate(
+        "() => { const e=document.getElementById('wkTrend');"
+        " const f=document.getElementById('wkFoot');"
+        " return (e?e.innerText:'') + '\\n' + (f?f.innerText:''); }")
+
+def wait_weekly(page, timeout=90000):
+    page.wait_for_function(
+        "() => { const e=document.getElementById('wkTrend'); if(!e) return false;"
+        " const t=e.innerText;"
+        " return t.includes('週次データ取得失敗') || t.includes('データ蓄積中')"
+        " || t.includes('買残') || t.includes('比較停止'); }",
+        timeout=timeout)
+
+def search(page, code):
+    page.fill('#inp', code)
+    page.click('button.primary')
+
 print('chromium:', find_chromium())
 exe = find_chromium()
 
@@ -109,10 +127,20 @@ with sync_playwright() as pw:
     browser = pw.chromium.launch(executable_path=exe) if exe else pw.chromium.launch()
     page = browser.new_page(viewport={'width': 1280, 'height': 1400})
     js_errors = []
+    # 仅当「场景 9 故意 abort /api/weekly」进行中时，该 abort 引起的资源加载错误
+    # （net::ERR_FAILED / Failed to load resource）才被忽略。其余任何 console.error /
+    # pageerror / 资源加载异常都必须照常导致验收失败。
+    abort_active = {'v': False}
     page.on('pageerror', lambda e: js_errors.append(str(e)))
-    page.on('console',
-            lambda m: js_errors.append('console.' + m.type + ': ' + m.text)
-            if m.type == 'error' else None)
+
+    def _on_console(msg):
+        if msg.type != 'error':
+            return
+        t = msg.text
+        if abort_active['v'] and ('Failed to load resource' in t or t.startswith('net::ERR')):
+            return
+        js_errors.append('console.error: ' + t)
+    page.on('console', _on_console)
 
     # ---------- 场景 1：多股票切换 ----------
     print('\n=== 场景 1：多股票切换 ===')
@@ -323,6 +351,120 @@ with sync_playwright() as pw:
                 print(f'    ({label}: 无数据可比对，跳过标注断言)')
         except Exception as e:
             check(False, f'{label} 模式异常', str(e)[:120])
+
+    # ---------- 场景 6：週次トレンド 4519 ----------
+    print('\n=== 场景 6：週次トレンド 4519 ===')
+    try:
+        page.goto(URL, wait_until='domcontentloaded')
+        search(page, '4519')
+        wait_badge(page)
+        wait_weekly(page)
+        page.wait_for_timeout(500)
+        wt = read_weekly(page)
+        check('4週' in wt and '8週' in wt and '13週' in wt,
+              '4519 週次三行齐全', wt[:80].replace('\n', ' '))
+        check('データ蓄積中' in wt, '4519 13W 显示数据蓄积中')
+        check('（11/14週）' in wt, '4519 13W 显示 11/14週', wt[:140].replace('\n', ' '))
+        check('履歴' in wt and '11週' in wt, '4519 履歴 11週', wt[:140].replace('\n', ' '))
+        check('週次データ取得失敗' not in wt, '4519 周次正常取得（非失败）')
+    except Exception as e:
+        check(False, '4519 週次异常', str(e)[:120])
+
+    # ---------- 场景 7：股票切换 4519→6981 不残留 ----------
+    print('\n=== 场景 7：週次竞态（4519→6981） ===')
+    try:
+        page.goto(URL, wait_until='domcontentloaded')
+        search(page, '4519'); page.wait_for_timeout(200)
+        search(page, '6981')
+        wait_badge(page)
+        wait_weekly(page)
+        page.wait_for_timeout(500)
+        wt = read_weekly(page)
+        # 6981 的 4W 買残为负（≈ -30%）；若残留 4519 会显示 +20% 左右
+        check('買残 -' in wt, '6981 週次为自身数据（買残负）', wt[:140].replace('\n', ' '))
+        check('買残 +' not in wt, '6981 未残留 4519 的 +買残', wt[:140].replace('\n', ' '))
+    except Exception as e:
+        check(False, '週次竞态异常', str(e)[:120])
+
+    # ---------- 场景 8：285A 公司行动 → 比較停止 ----------
+    print('\n=== 场景 8：285A 公司行动（比較停止） ===')
+    try:
+        page.goto(URL, wait_until='domcontentloaded')
+        search(page, '285A')
+        wait_badge(page)
+        wait_weekly(page)
+        page.wait_for_timeout(500)
+        wt = read_weekly(page)
+        check('比較停止' in wt, '285A 受影响周期显示 比較停止', wt[:180].replace('\n', ' '))
+        check('株式分割・併合の影響' in wt, '285A 显示 株式分割・併合の影響')
+        check('買残 +2' not in wt, '285A 不显示误导性巨大買残变化', wt[:180].replace('\n', ' '))
+    except Exception as e:
+        check(False, '285A 公司行动异常', str(e)[:120])
+
+    # ---------- 场景 9：週次 API 失败不影响 margin 主页面 ----------
+    print('\n=== 场景 9：週次 API 失败隔离 ===')
+    try:
+        abort_active['v'] = True
+        page.route('**/api/weekly*', lambda route: route.abort())
+        page.goto(URL, wait_until='domcontentloaded')
+        search(page, '4519')
+        wait_badge(page)
+        page.wait_for_timeout(2500)
+        home = read_home(page)
+        wt = read_weekly(page)
+        ok_grade = any(g in home for g in ('改善', '中立', '注意', '悪化', '判定不能'))
+        check(ok_grade, '週次失败时 margin 主页仍正常（有评级）')
+        check('週次データ取得失敗' in wt, '週次失败时本区块单独报错', wt[:80].replace('\n', ' '))
+        check('読み込み中' not in home, 'margin 主页无残留 loading')
+    except Exception as e:
+        check(False, '週次隔离异常', str(e)[:120])
+    finally:
+        abort_active['v'] = False
+        try:
+            page.unroute('**/api/weekly*')
+        except Exception:
+            pass
+
+    # ---------- 场景 10：13W 未来可用 fixture ----------
+    print('\n=== 场景 10：13W 可用 fixture ===')
+    try:
+        fixture = {
+            "ok": True, "code": "9999", "coverageWeeks": 14,
+            "rows": [{"weekEnding": "2026-07-10", "buy": 1000000, "sell": 500000, "ratio": 2.0},
+                     {"weekEnding": "2026-10-09", "buy": 950000, "sell": 480000, "ratio": 1.98}],
+            "trends": {
+                "w4":  {"available": True, "fromDate": "2026-10-02", "toDate": "2026-10-09", "buyPct": -5.0, "sellPct": -4.0, "ratioFrom": 2.0, "ratioTo": 1.98, "corporateActionAffected": False},
+                "w8":  {"available": True, "fromDate": "2026-09-18", "toDate": "2026-10-09", "buyPct": -3.0, "sellPct": -2.0, "ratioFrom": 2.1, "ratioTo": 1.98, "corporateActionAffected": False},
+                "w13": {"available": True, "fromDate": "2026-07-10", "toDate": "2026-10-09", "buyPct": -7.7, "sellPct": -4.0, "ratioFrom": 2.0, "ratioTo": 1.98, "corporateActionAffected": False},
+            },
+            "sources": {"ganan": {"weeks": 14, "from": "2026-07-10", "to": "2026-10-09"}, "jpx": {"weeks": 0, "from": None, "to": None}, "mergedWeeks": 14, "jpxWinsWeeks": 0, "note": "fixture"},
+        }
+        page.goto(URL, wait_until='domcontentloaded')
+        page.evaluate("(function(){ renderWeeklyTrend(%s); })()" % json.dumps(fixture))
+        page.wait_for_timeout(300)
+        wt = read_weekly(page)
+        check('13週' in wt, '13W 可用时显示 13週 行')
+        check('買残 -7.7%' in wt, '13W 可用时显示数字变化（非数据蓄积中）', wt[:200].replace('\n', ' '))
+        check('データ蓄積中' not in wt, '13W 可用时不显示数据蓄积中')
+    except Exception as e:
+        check(False, '13W fixture 异常', str(e)[:120])
+
+    # ---------- 场景 11：窄屏不溢出 ----------
+    print('\n=== 场景 11：窄屏布局（380px） ===')
+    try:
+        page.set_viewport_size({'width': 380, 'height': 800})
+        page.goto(URL, wait_until='domcontentloaded')
+        search(page, '4519')
+        wait_badge(page)
+        wait_weekly(page)
+        page.wait_for_timeout(400)
+        box = page.evaluate(
+            "() => { const e=document.getElementById('wkTrend'); const r=e.getBoundingClientRect();"
+            " return {right:r.right, w:r.width, vw:window.innerWidth}; }")
+        check(box['right'] <= box['vw'] + 1, '窄屏 wkTrend 不溢出视口', box)
+        page.set_viewport_size({'width': 1280, 'height': 1400})
+    except Exception as e:
+        check(False, '窄屏布局异常', str(e)[:120])
 
     page.screenshot(path='/tmp/verify_final.png', full_page=True)
     browser.close()

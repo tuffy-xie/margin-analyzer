@@ -341,6 +341,18 @@
     background:rgba(245,165,36,.07);border-left:2px solid var(--warn);
     padding:5px 8px;border-radius:0 4px 4px 0}
   .srcnote b{color:var(--warn)}
+  /* 信用残トレンド（週次 4W/8W/13W，间接信息层，不参与评级） */
+  .wktrend{display:flex;flex-direction:column;gap:5px;font-size:12.5px;font-variant-numeric:tabular-nums}
+  .wkrow{display:flex;align-items:baseline;gap:8px}
+  .wkrow .wk{color:var(--sub);width:36px;flex:none}
+  .wkrow .wkval{font-weight:600}
+  .wkrow .wkr{color:var(--sub);font-size:11px}
+  .wkrow.stop .wkval{color:var(--warn)}
+  .wkrow.stop .wksub{color:var(--sub);font-size:11px;margin-left:2px}
+  .wkfoot{font-size:10.5px;color:var(--sub);margin-top:6px;line-height:1.5}
+  .wkfoot .mix{color:#8ab0ff}   /* 弱提示，非警告框 */
+  .wkfail{font-size:11.5px;color:var(--sub);padding:8px 0}
+  .chart.wk{height:200px}
 </style>
 </head>
 <body>
@@ -400,6 +412,13 @@
     <div class="kpi"><div class="k">読み込み中</div><div class="v">—</div></div>
   </div>
 
+  <!-- 信用残トレンド（週次 4W/8W/13W，间接信息层，不参与评级） -->
+  <div class="card">
+    <h3>信用残トレンド<small>4週 / 8週 / 13週（買残・倍率の変化）</small></h3>
+    <div id="wkTrend" class="wktrend"><div class="empty">読み込み中…</div></div>
+    <div id="wkFoot" class="wkfoot"></div>
+  </div>
+
   <!-- 唯一的图：株価 × 信用買残（默认变化率 / 单 Y 轴） -->
   <div class="card">
     <h3>株価 × 信用買残
@@ -422,6 +441,13 @@
      Tab 2：信用残詳細
      ================================================================ -->
 <div class="tabpane hide" id="tab1">
+
+  <!-- 信用残 週次トレンド（新增：周次序列图） -->
+  <div class="card">
+    <h3>信用残 週次トレンド<small id="wkDetailSub">全週次序列</small></h3>
+    <div id="cWk" class="chart wk" style="height:200px"></div>
+    <div id="wkDetailKpi" class="wkfoot"></div>
+  </div>
 
   <div class="card">
     <h3>信用買残・売残与信用倍率<small id="rangeTitle" style="font-weight:400"></small></h3>
@@ -2545,6 +2571,9 @@ async function run(forceFresh){
 
     render(d);
 
+    // 週次トレンド（独立抓取，竞态由 mySeq 守卫；失败不影响本页）
+    fetchWeekly(code, mySeq);
+
     // 详细页：完整数据范围与公表时机
     const sr = document.getElementById('srcRange');
     if (sr && d.rows.length) sr.textContent =
@@ -2581,7 +2610,7 @@ async function run(forceFresh){
 
 /** 清空所有图表（切换股票后旧图必须消失） */
 function clearCharts(){
-  ['c1','c4'].forEach(function(id){
+  ['c1','c4','cWk'].forEach(function(id){
     const c = ec[id];
     if (c) { try { c.clear(); } catch(e){} }
   });
@@ -2598,11 +2627,138 @@ function clearAnalysisPanels(){
   const w = $('hWatch'); if (w) w.style.display = 'none';
   const n = document.getElementById('name'); if (n) n.textContent = '—';
   const c = document.getElementById('codeLbl'); if (c) c.textContent = '';
+  // 週次トレンド：清空，避免残留上一只股票
+  set('wkTrend', '<div class="empty">読み込み中…</div>');
+  set('wkFoot', '');
+  set('wkDetailKpi', '');
   ['verdictBox','anomBox','indBox','quadBox','digestCalc','listedCalc','dataSrc','epsBox','vrNote','tbody']
     .forEach(function(id){ set(id, ''); });
 }
 
 /** 复用引擎的计算逻辑，接收外部传入的信用残行 */
+/* ================================================================
+ * 信用残週次トレンド（/api/weekly）
+ *   · 独立抓取，失败只影响本区块，margin 页面其余功能照常。
+ *   · 竞态由 run() 的 mySeq / __runSeq 守卫，旧请求不覆盖新股票。
+ *   · 仅做弱视觉提示（買残減少=改善色 / 買残増加=注意色），不引入新评分。
+ * ================================================================ */
+const WK_PERIODS = [
+  { key:'w4',  label:'4週',  req:5  },
+  { key:'w8',  label:'8週',  req:9  },
+  { key:'w13', label:'13週', req:14 },
+];
+
+function fetchWeekly(code, seq){
+  const url = MA_OFFICIAL.LOCAL_API + '/api/weekly?code=' + encodeURIComponent(code);
+  const ctrl = new AbortController();
+  const t = setTimeout(function(){ ctrl.abort(); }, 60000);
+  fetch(url, { signal: ctrl.signal })
+    .then(function(r){ clearTimeout(t); if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
+    .then(function(resp){
+      clearTimeout(t);
+      if (seq !== __runSeq) return;                 // 已有更新请求，丢弃本次结果
+      if (!resp || resp.ok !== true) throw new Error((resp && resp.err) || '无数据');
+      window.__lastWeekly = resp;
+      renderWeeklyTrend(resp);
+      renderWeeklyChart(resp);
+    })
+    .catch(function(e){
+      clearTimeout(t);
+      if (seq !== __runSeq) return;                 // 竞态：丢弃旧请求的失败
+      const el = document.getElementById('wkTrend');
+      if (el) el.innerHTML = '<div class="wkfail">週次データ取得失敗（ページ其余功能は通常通り動作）</div>';
+      const f = document.getElementById('wkFoot'); if (f) f.textContent = '';
+    });
+}
+
+/** 首页紧凑区：4週/8週/13週 的 買残変化 + 倍率変化（或 データ蓄積中 / 比較停止） */
+function renderWeeklyTrend(resp){
+  const box = document.getElementById('wkTrend');
+  if (!box) return;
+  const tr = resp.trends || {};
+  const cov = resp.coverageWeeks || 0;
+  let html = '';
+  for (const p of WK_PERIODS){
+    const t = tr[p.key];
+    html += '<div class="wkrow' + (t && t.corporateActionAffected ? ' stop' : '') + '">';
+    html += '<span class="wk">' + p.label + '</span>';
+    if (!t || !t.available){
+      html += '<span class="wkval">データ蓄積中</span>';
+      html += '<span class="wkr">（' + cov + '/' + p.req + '週）</span>';
+    } else if (t.corporateActionAffected){
+      html += '<span class="wkval">比較停止</span>';
+      html += '<span class="wksub">株式分割・併合の影響</span>';
+    } else {
+      const bp = t.buyPct;
+      const col = (bp == null) ? 'var(--sub)' : (bp < 0 ? 'var(--ok)' : (bp > 0 ? 'var(--warn)' : 'var(--sub)'));
+      const bpTxt = (bp == null) ? '—' : (bp > 0 ? '+' : '') + bp.toFixed(1) + '%';
+      const rf = (t.ratioFrom == null) ? '—' : t.ratioFrom.toFixed(1);
+      const rt = (t.ratioTo   == null) ? '—' : t.ratioTo.toFixed(1);
+      html += '<span class="wkval" style="color:' + col + '">買残 ' + bpTxt + '</span>';
+      html += '<span class="wkr">倍率 ' + rf + ' → ' + rt + '</span>';
+    }
+    html += '</div>';
+  }
+  box.innerHTML = html;
+
+  const foot = document.getElementById('wkFoot');
+  if (foot){
+    let s = '履歴：' + cov + '週';
+    const src = resp.sources || {};
+    const mixed = src.ganan && src.ganan.weeks > 0 && src.jpx && src.jpx.weeks > 0;
+    if (mixed) s += '<br><span class="mix">一部期間に外部集計データを使用</span>';
+    foot.innerHTML = s;
+  }
+}
+
+/** 详细页：周次 買残/売残 柱 + 倍率 折线（x = weekEnding，倍率入 tooltip 与下方 KPI） */
+function renderWeeklyChart(resp){
+  const el = document.getElementById('cWk');
+  if (!el || typeof echarts === 'undefined') return;
+  const rows = (resp.rows || []).slice().sort(function(a,b){ return a.weekEnding.localeCompare(b.weekEnding); });
+  const xs   = rows.map(function(r){ return r.weekEnding.slice(5).replace('-', '/'); });   // MM/DD
+  const buy  = rows.map(function(r){ return r.buy  != null ? +(r.buy  / 10000).toFixed(1) : null; });  // 万株
+  const sell = rows.map(function(r){ return r.sell != null ? +(r.sell / 10000).toFixed(1) : null; });
+  const ratio= rows.map(function(r){ return r.ratio != null ? +r.ratio.toFixed(2) : null; });
+  const c = chart('cWk');
+  c.setOption({
+    backgroundColor:'#1d2536', borderColor:'#2a3448', textStyle:{color:'#e8ecf4',fontSize:12},
+    tooltip:{trigger:'axis', backgroundColor:'#0f1420', borderColor:'#2a3448', textStyle:{color:'#e8ecf4',fontSize:11},
+      formatter:function(ps){
+        let s = ps[0].axisValue + '<br>';
+        ps.forEach(function(p){
+          if (p.seriesName === '倍率') s += p.marker + '倍率：' + (p.value != null ? p.value : '—') + '<br>';
+          else s += p.marker + p.seriesName + '：' + (p.value != null ? p.value.toLocaleString() + ' 万株' : '—') + '<br>';
+        });
+        return s;
+      }},
+    legend:{data:['買残','売残','倍率'], textStyle:{color:'#8b96ad',fontSize:11}, itemWidth:12, itemHeight:8, itemGap:14, top:0},
+    grid:{left:50, right:50, top:30, bottom:24},
+    xAxis:{type:'category', data:xs, axisLine:{lineStyle:{color:'#2a3448'}}, axisLabel:{color:'#8b96ad',fontSize:10}},
+    yAxis:[
+      {type:'value', name:'万株', nameTextStyle:{color:'#8b96ad',fontSize:10},
+        splitLine:{lineStyle:{color:'rgba(42,52,72,.5)'}}, axisLabel:{color:'#8b96ad',fontSize:10}},
+      {type:'value', name:'倍率', nameTextStyle:{color:'#8b96ad',fontSize:10},
+        splitLine:{show:false}, axisLabel:{color:'#8b96ad',fontSize:10}}
+    ],
+    series:[
+      {name:'買残', type:'bar',  yAxisIndex:0, data:buy,  itemStyle:{color:'#4a7dff'}},
+      {name:'売残', type:'bar',  yAxisIndex:0, data:sell, itemStyle:{color:'#b06cff'}},
+      {name:'倍率', type:'line', yAxisIndex:1, data:ratio, smooth:true,
+        lineStyle:{width:2, color:'#f5a524'}, itemStyle:{color:'#f5a524'}}
+    ]
+  });
+  const kpi = document.getElementById('wkDetailKpi');
+  if (kpi){
+    const last = rows[rows.length - 1];
+    const rv = (last && last.ratio != null) ? last.ratio.toFixed(2) : '—';
+    kpi.innerHTML = '最新倍率：<b style="color:var(--ratio)">' + rv + '</b>　序列：' +
+                    rows.length + '週（週次履歴 ' + (resp.coverageWeeks || 0) + '週）';
+  }
+  const sub = document.getElementById('wkDetailSub');
+  if (sub) sub.textContent = '全週次序列（' + rows.length + '週）';
+}
+
 async function buildAnalysis(code, val, rows, srcMeta){
   // 只过滤「买残缺失/为 0」的行；卖残=0 是合法的（无融券余额），
   // 此时倍率为 null，前端显示「—」，不应丢弃该标的。
