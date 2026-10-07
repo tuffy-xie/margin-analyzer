@@ -304,12 +304,35 @@
   .deltaNote{grid-column:1/-1;font-size:12px;line-height:1.6;padding:5px 2px 0}
   .deltaNote.逆{color:var(--sell);font-weight:600}
 
-  /* ---- 注目 ---- */
-  .watch{background:rgba(74,125,255,.07);border:1px solid rgba(74,125,255,.28);
-    border-radius:9px;padding:11px 14px;margin-top:12px}
-  .watchT{font-size:12px;font-weight:700;margin-bottom:4px;color:#8ab0ff}
-  .watchB{font-size:12.5px;line-height:1.7}
-  .watchB li{margin-left:16px;margin-bottom:2px}
+  /* ---- 注目（Hero 下方，优先级高于普通详情，但不是巨型警告框） ---- */
+  .watch{background:rgba(74,125,255,.09);border:1px solid rgba(74,125,255,.34);
+    border-left:3px solid var(--buy);
+    border-radius:9px;padding:12px 15px;margin:2px 0 12px}
+  .watchT{font-size:13px;font-weight:800;margin-bottom:6px;color:#8ab0ff;
+    letter-spacing:.2px;display:flex;align-items:center;gap:6px}
+  .watchT::after{content:'';flex:1;height:1px;background:rgba(74,125,255,.22)}
+  .watchB{font-size:13.5px;line-height:1.75;font-weight:600;color:var(--txt)}
+  .watchB li{margin-left:18px;margin-bottom:3px}
+  .watchB li::marker{color:var(--buy)}
+  .watchNote{margin-top:7px;font-size:11.5px;line-height:1.5;color:var(--sub)}
+
+  /* ---- Hero 四象限方向（结构化「为什么」，无新增评分） ----
+     明确要求：作为「价格 / 结论徽章」之下的【明显第二视觉层级】，
+     不能是普通小字。故用上下分隔带 + 更大箭头，与结论徽章拉开层级。 */
+  .heroQuad{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+    margin:8px 0 6px;padding:7px 0;
+    border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+  .heroQuad .hqCell{display:inline-flex;align-items:baseline;gap:6px;
+    background:var(--card2);border:1px solid var(--line);border-radius:9px;
+    padding:6px 14px}
+  .heroQuad .hqLbl{font-size:12.5px;color:var(--sub);font-weight:700}
+  .heroQuad .hqArr{font-size:23px;font-weight:800;line-height:1.1}
+  .heroQuad .hqX{color:var(--sub);font-size:14px;font-weight:700}
+  .heroQuad .hqArr.up{color:var(--sell)}      /* JP: 上昇=赤 */
+  .heroQuad .hqArr.down{color:var(--buy)}     /* JP: 下落=緑 */
+  .heroQuad .hqArr.flat{color:var(--sub)}
+  .heroQuad .hqArr.na{color:var(--sub);font-size:14px}
+  .heroQuadReason{font-size:12.5px;color:var(--txt);line-height:1.6;margin-top:2px}
 
   /* ---- 底部 Tab ---- */
   @media(max-width:640px){ .wide-only{display:none} }
@@ -396,6 +419,8 @@
     </div>
     <div class="heroR">
       <div class="heroBadge" id="hBadge">読み込み中…</div>
+      <div class="heroQuad" id="hQuad"></div>
+      <div class="heroQuadReason" id="hQuadReason"></div>
       <div class="heroPos" id="hPos"></div>
       <div class="heroWhy" id="hWhy"></div>
     </div>
@@ -403,6 +428,13 @@
 
   <!-- 会社行為（拆并股）警示：只在受影响时显示 -->
   <div class="caWarn" id="hCA" style="display:none"></div>
+
+  <!-- 注目：Hero 正下方、KPI 上方（视觉优先级高于普通详情） -->
+  <div class="watch" id="hWatch" style="display:none">
+    <div class="watchT">👀 注目</div>
+    <div class="watchB" id="hWatchB"></div>
+    <div class="watchNote">※ 支持位は「終値（close）」ベースの参考値です（日中の最安値ではありません）。</div>
+  </div>
 
   <!-- 方向 vs 残量（Hero 下的两行事实，各只出现一次） -->
   <div class="facts" id="hFacts"></div>
@@ -428,12 +460,6 @@
       </span>
     </h3>
     <div id="c4" class="chart" style="height:190px"></div>
-  </div>
-
-  <!-- 注目 -->
-  <div class="watch" id="hWatch" style="display:none">
-    <div class="watchT">👀 注目</div>
-    <div class="watchB" id="hWatchB"></div>
   </div>
 </div>
 
@@ -2622,6 +2648,8 @@ function clearAnalysisPanels(){
   set('hBadge', '読み込み中…');
   set('hWhy', '');
   set('hPos', '');
+  set('hQuad', '');
+  set('hQuadReason', '');
   set('hFacts', '');
   set('hKpis', '<div class="kpi"><div class="k">読み込み中</div><div class="v">—</div></div>');
   const w = $('hWatch'); if (w) w.style.display = 'none';
@@ -2661,6 +2689,8 @@ function fetchWeekly(code, seq){
       window.__lastWeekly = resp;
       renderWeeklyTrend(resp);
       renderWeeklyChart(resp);
+      // 週次到着後に「データ来源与完整性」の 13週/週次出所 行を最新化
+      if (window.__lastD && window.__lastD.code === resp.code) renderDataSrc(window.__lastD);
     })
     .catch(function(e){
       clearTimeout(t);
@@ -2725,14 +2755,15 @@ function renderWeeklyChart(resp){
     backgroundColor:'#1d2536', borderColor:'#2a3448', textStyle:{color:'#e8ecf4',fontSize:12},
     tooltip:{trigger:'axis', backgroundColor:'#0f1420', borderColor:'#2a3448', textStyle:{color:'#e8ecf4',fontSize:11},
       formatter:function(ps){
+        const idx = ps[0].dataIndex;
         let s = ps[0].axisValue + '<br>';
-        ps.forEach(function(p){
-          if (p.seriesName === '倍率') s += p.marker + '倍率：' + (p.value != null ? p.value : '—') + '<br>';
-          else s += p.marker + p.seriesName + '：' + (p.value != null ? p.value.toLocaleString() + ' 万株' : '—') + '<br>';
-        });
+        // 買残/売残 数量级差太大，売残不单独画柱，仅放在 tooltip
+        s += '<span style="color:#4a7dff">●</span> 買残：' + (buy[idx]  != null ? buy[idx].toLocaleString()  + ' 万株' : '—') + '<br>';
+        s += '<span style="color:#b06cff">●</span> 売残：' + (sell[idx] != null ? sell[idx].toLocaleString() + ' 万株' : '—') + '<br>';
+        s += '<span style="color:#f5a524">●</span> 倍率：' + (ratio[idx] != null ? ratio[idx] : '—') + '<br>';
         return s;
       }},
-    legend:{data:['買残','売残','倍率'], textStyle:{color:'#8b96ad',fontSize:11}, itemWidth:12, itemHeight:8, itemGap:14, top:0},
+    legend:{data:['買残','倍率'], textStyle:{color:'#8b96ad',fontSize:11}, itemWidth:12, itemHeight:8, itemGap:14, top:0},
     grid:{left:50, right:50, top:30, bottom:24},
     xAxis:{type:'category', data:xs, axisLine:{lineStyle:{color:'#2a3448'}}, axisLabel:{color:'#8b96ad',fontSize:10}},
     yAxis:[
@@ -2743,7 +2774,6 @@ function renderWeeklyChart(resp){
     ],
     series:[
       {name:'買残', type:'bar',  yAxisIndex:0, data:buy,  itemStyle:{color:'#4a7dff'}},
-      {name:'売残', type:'bar',  yAxisIndex:0, data:sell, itemStyle:{color:'#b06cff'}},
       {name:'倍率', type:'line', yAxisIndex:1, data:ratio, smooth:true,
         lineStyle:{width:2, color:'#f5a524'}, itemStyle:{color:'#f5a524'}}
     ]
@@ -3020,7 +3050,23 @@ function renderHero(d){
   const pc = q.priceChg!=null ? q.priceChg
             : (d.val.priceChgAligned!=null ? d.val.priceChgAligned : null);
 
-  /* --- ④ 一句结论（不重复上面已出现的百分比） --- */
+  /* --- ④ 核心结构原因：股价方向 × 信用買残方向 ---
+     用 engine 已算好的 priceChg / buyChg 直接呈现四象限形态，
+     让用户一眼看到「为什么」；不新增任何评分或买卖结论。 */
+  const quadEl = $('hQuad'), quadReasonEl = $('hQuadReason');
+  if (quadEl){
+    if (q.key === 'corporateAction' || q.key === 'unknown'){
+      // 方向判定被停止/无法判定 → 不编造方向，如实留空
+      quadEl.innerHTML = '';
+      if (quadReasonEl) quadReasonEl.textContent = '';
+    } else {
+      quadEl.innerHTML = renderQuadrant(q);
+      // 下一行用较小文字说明结构（复用 engine 的 quadrant.text，不自造结论）
+      if (quadReasonEl) quadReasonEl.textContent = q.text || '';
+    }
+  }
+
+  /* --- ⑤ 一句结论（不重复上面已出现的百分比） --- */
   $('hWhy').innerHTML = buildWhy(d);
 
   /* --- ④b 公司行动警示（issue 3）---
@@ -3127,6 +3173,149 @@ function kpiCard(k, v, lvTxt, color, sub){
     (sub?'<div class="sub">'+sub+'</div>':'')+'</div>';
 }
 
+/* ================================================================
+ * 短期支持位（用于「👀 注目」的唯一价格观察位）
+ * ----------------------------------------------------------------
+ * 目标：给波段（几周～3个月）一个**真实技术支撑**，而不是机械的
+ *       currentPrice * 0.98。
+ * 数据源：项目现有 Yahoo 日线（bars），**不引入新数据源**。
+ *   注：Yahoo bars 只有 date/close/adjClose/vol，没有 low/high。
+ *   因此 pivot 用 **收盘价序列** 定义（等价于标准 swing-low 的
+ *   收盘变体），仍是完全可解释的真实历史结构，且不需改数据层。
+ *
+ * 规则（严格按需求）：
+ *   - 取最近最多 60 根日线
+ *   - pivot low：某根 close 同时低于 前2根 与 后2根 的 close
+ *   - 只保留 supportPrice < currentPrice 的候选
+ *   - 相差 <= 1% 的 pivot 视为同一支撑区域（输出区域中心价）
+ *   - 优先级：当前价下方 → touchCount 多 → 距离近 → 最近发生
+ *   - 存在 >=2 次 touch 的区域时优先
+ *   - fallback1：最近 20 交易日最低价（type='20d_low'）
+ *   - 连 20 日有效行情都不足：type='none'，不显示价格
+ *   - **绝不** fallback 回 currentPrice * 0.98
+ *   - 绝不使用未来 K 线：最后 2 根因缺「后2根」永不参与 pivot
+ * 返回 { price, type, touches, date, distancePct }；不参与任何评分。
+ * ================================================================ */
+function calcShortSupport(bars, currentPrice){
+  const NONE = { price:null, type:'none', touches:0, date:null, distancePct:null };
+  if (!bars || !bars.length || currentPrice==null || !isFinite(currentPrice) || currentPrice<=0){
+    return NONE;
+  }
+  // 只保留有有效收盘价的最近最多 60 根
+  const win = bars.filter(b => b && isFinite(b.close)).slice(-60);
+  if (!win.length) return NONE;
+
+  const N = win.length;
+  // pivot low：严格「前2 + 后2」；最后 2 根缺后2根 → 天然排除（不用未来K线）
+  const pivots = [];
+  for (let k = 2; k <= N - 3; k++){
+    const v = win[k].close;
+    if (v < win[k-1].close && v < win[k-2].close &&
+        v < win[k+1].close && v < win[k+2].close){
+      pivots.push({ price:v, date:win[k].date, idx:k });
+    }
+  }
+  // 只考虑当前价下方的支撑
+  const below = pivots.filter(p => p.price < currentPrice);
+
+  if (below.length){
+    // 聚类：相差 <=1% 视为同一支撑区域（按价格升序贪心分组）
+    below.sort((a,b) => a.price - b.price);
+    const clusters = [];
+    for (const p of below){
+      const last = clusters[clusters.length-1];
+      if (last && (p.price - last.center) / last.center <= 0.01){
+        last.items.push(p);
+        // 中心价 = 组内均值（保持区域概念，非单点精确价）
+        last.center = last.items.reduce((s,x) => s + x.price, 0) / last.items.length;
+        if (p.date > last.latestDate) last.latestDate = p.date;
+      } else {
+        clusters.push({ center:p.price, items:[p], latestDate:p.date });
+      }
+    }
+    for (const c of clusters){
+      c.touches = c.items.length;
+      c.centerPrice = c.center;
+    }
+    // 存在 >=2 次 touch 的区域 → 只在这些「有效区域」里选
+    const strong = clusters.filter(c => c.touches >= 2);
+    const pool = strong.length ? strong : clusters;
+    // 优先级：touch 多 → 距离近（distancePct 小）→ 最近发生（date 大）
+    pool.sort((a,b) => {
+      if (b.touches !== a.touches) return b.touches - a.touches;
+      const da = (currentPrice - a.centerPrice), db = (currentPrice - b.centerPrice);
+      if (Math.abs(da) !== Math.abs(db)) return Math.abs(da) - Math.abs(db);
+      return a.latestDate < b.latestDate ? 1 : -1;
+    });
+    const best = pool[0];
+    return {
+      price: Math.round(best.centerPrice),
+      type: best.touches >= 2 ? 'pivot_cluster' : 'pivot',
+      touches: best.touches,
+      date: best.latestDate,
+      distancePct: +(((currentPrice - best.centerPrice) / currentPrice) * 100).toFixed(1),
+    };
+  }
+
+  // fallback1：最近 20 交易日最低价（需 >=20 根有效行情）
+  if (N >= 20){
+    const last20 = win.slice(-20);
+    let lo = last20[0];
+    for (const b of last20) if (b.close < lo.close) lo = b;
+    if (lo.close < currentPrice){
+      return {
+        price: Math.round(lo.close),
+        type: '20d_low',
+        touches: 1,
+        date: lo.date,
+        distancePct: +(((currentPrice - lo.close) / currentPrice) * 100).toFixed(1),
+      };
+    }
+  }
+  // 连 20 日有效行情都不足 → 不显示价格（绝不回退 -2%）
+  return NONE;
+}
+
+/** 把 support 变成「👀 注目」里的一句话价格观察位；type=none 返回 null（不硬凑）。
+ *  ----------------------------------------------------------------
+ *  信度分级（避免单次 pivot 被包装成强支撑）：
+ *   - touches >= 2（pivot_cluster）→ 称「短期支持」（多次测试的有效区域）
+ *   - touches == 1（pivot）       → 称「参考水準」，绝不称为明确支持
+ *   - fallback 20d_low            → 称「20日安値参考」
+ *  算法基于「終値（close）」而非「日中安値（low）」，UI 统一标注「終値ベース」，
+ *  以免用户误以为是日内最低价支撑。 */
+function supportWatchText(sup){
+  if (!sup || sup.type === 'none' || sup.price == null) return null;
+  const p = sup.price.toLocaleString();
+  if (sup.type === '20d_low'){
+    // fallback：近 20 日終値最低，仅作参考
+    return '直近20日の終値安値 ' + p + '円付近（終値ベース・20日安値参考）を維持できるか';
+  }
+  if (sup.type === 'pivot_cluster'){
+    // 多次 touched 的有效区域 → 真正的短期支持
+    return '約' + p + '円付近の終値ベース短期支持を維持できるか';
+  }
+  // 单次 pivot：只 touch 1 次，信度弱 → 仅称参考水準（不称支持）
+  return '約' + p + '円付近の終値ベース参考水準（1回のみのタッチ・信頼度低）を維持できるか';
+}
+
+/** Hero 四象限：把当前真实状态渲染成「株価 ↑/↓ × 信用買残 ↑/↓」
+ *  纯展示 engine 已算好的 priceChg / buyChg，不新增任何评分。 */
+function renderQuadrant(q){
+  const cell = (lbl, val, cls) =>
+    '<span class="hqCell"><span class="hqLbl">' + lbl + '</span>' +
+    '<span class="hqArr ' + cls + '">' + val + '</span></span>';
+  const arr = (v) => {
+    if (v == null || !isFinite(v)) return { s:'—', c:'na' };
+    if (v > 0.5)  return { s:'↑', c:'up' };
+    if (v < -0.5) return { s:'↓', c:'down' };
+    return { s:'→', c:'flat' };
+  };
+  const pa = arr(q.priceChg), ba = arr(q.buyChg);
+  return cell('株価', pa.s, pa.c) + '<span class="hqX">×</span>' +
+         cell('信用買残', ba.s, ba.c);
+}
+
 /** 一句结论（≤60字）
  *  ★ issue 9：**唯一结论来源 = engine 的 verdict**。
  *  旧实现按 quadrant.key 自己组织文案，于是可能出现
@@ -3170,15 +3359,19 @@ function buildWhy(d){
   return shape + '。<br>' + weight + '、' + tail + '。';
 }
 
-/** ④ 下一步观察什么 */
+/** ④ 下一步观察什么（最多 3 条，优先真实技术支撑，不用 -2% 机械位） */
 function buildWatch(d){
   const i = d.ind, q = i.quadrant, v = d.val, out = [];
+  // 真实短期支撑（仅用于本区域，不参与任何评分）
+  const sup = calcShortSupport(d.barsAll || (i.priceBarsAll || null), v.price);
+  const supTxt = supportWatchText(sup);
+
   if (q.key === 'accumulateDown'){
     out.push('信用買残が減少に転じるか');
-    out.push('株価が' + (v.price!=null?Math.round(v.price*0.98).toLocaleString():'—') + '円台を維持できるか');
+    if (supTxt) out.push(supTxt);
   } else if (q.key === 'chasing'){
     out.push('買残の増加が鈍化するか');
-    out.push('株価と買残の乖離が拡大していないか');
+    if (supTxt) out.push(supTxt);
   } else if (q.key === 'strong'){
     out.push('買残减少が継続するか');
     out.push('売残の再拡大（空売り建倉）の有無');
@@ -3318,11 +3511,37 @@ function renderDataSrc(d){
   if (!sm.isOfficial) {
     s += krow('　注意', '現在の信用残データは Ganan の週次データ（口径与 JPX 官方日次不同）', 'warn');
   }
-  s += krow('13週データ', '未取得（2026-09-28 制度変更で個票週次公表が終了）', 'warn');
+  // 週次トレンド（/api/weekly）の実データを反映 —— 「未取得」は書かない
+  const wk = (window.__lastWeekly && window.__lastWeekly.code === d.code) ? window.__lastWeekly : null;
+  if (wk) {
+    const cov = wk.coverageWeeks || (wk.rows ? wk.rows.length : 0);
+    const w13 = wk.trends ? wk.trends.w13 : null;
+    if (w13 && w13.available) {
+      s += krow('13週トレンド', '利用可能（' + cov + '週 蓄積済）', 'ok');
+    } else {
+      s += krow('13週トレンド', 'データ蓄積中（' + cov + '/14週）', 'warn');
+    }
+    const srcs = [];
+    if (wk.sources && wk.sources.ganan && wk.sources.ganan.weeks > 0) srcs.push('Ganan 週次');
+    if (wk.sources && wk.sources.jpx && wk.sources.jpx.weeks > 0) srcs.push('JPX 日次の週次化');
+    s += krow('週次出所', srcs.length ? srcs.join(' + ') : '—');
+  } else {
+    s += krow('13週トレンド', '週次データ準備中…', 'warn');
+    s += krow('週次出所', '—');
+  }
   s += krow('行情来源', d.hasBars ? 'Yahoo Finance（' + d.barsN + ' 営業日）' : '未取得', d.hasBars?'':'warn');
   s += krow('EPS/BPS', d.pts && d.pts.bpsVerified ? '财报实值' : '未検証（推算値を計算に使用せず）',
             d.pts && d.pts.bpsVerified ? 'ok' : 'warn');
-  s += krow('13週前比', d.weekOverWeek.buy!=null ? '有' : '—（周次数据未取得，不以短周期代替）', 'warn');
+  if (wk) {
+    const w13 = wk.trends ? wk.trends.w13 : null;
+    if (w13 && w13.available && w13.buyPct != null) {
+      s += krow('13週前比', '買残 ' + (w13.buyPct > 0 ? '+' : '') + w13.buyPct + '%');
+    } else {
+      s += krow('13週前比', '—（13週データ蓄積中）');
+    }
+  } else {
+    s += krow('13週前比', '—');
+  }
   $('dataSrc').innerHTML = s;
 }
 

@@ -120,6 +120,12 @@ def search(page, code):
     page.fill('#inp', code)
     page.click('button.primary')
 
+# 上游节流：Yahoo / Ganan 走公共代理，连续快速刷新会触发 HTTP 429。
+# 浏览器端每次整页加载都会重新拉一次 Yahoo 日线，因此场景之间留出间隔，
+# 避免把「上游限流」误判成应用缺陷（限流属环境问题，不是 JS 错误）。
+def throttle(ms=2500):
+    time.sleep(ms / 1000.0)
+
 print('chromium:', find_chromium())
 exe = find_chromium()
 
@@ -465,6 +471,113 @@ with sync_playwright() as pw:
         page.set_viewport_size({'width': 1280, 'height': 1400})
     except Exception as e:
         check(False, '窄屏布局异常', str(e)[:120])
+
+    # ---------- 场景 12：注目 的真实支撑（非 -2% 机械位） ----------
+    print('\n=== 场景 12-14/16：注目真实支撑 / Hero 四象限 / 注目位置 / 窄屏 ===')
+    # 这 4 项都只读同一只股票(4519)的 DOM，共用一次整页加载 —— Yahoo 走公共代理，
+    # 每次 reload 都会重新拉一次日线，频繁 reload 会触发上游 429 限流（环境问题）。
+    try:
+        page.goto(URL, wait_until='domcontentloaded')
+        search(page, '4519')
+        wait_badge(page)
+        page.wait_for_timeout(700)
+
+        # ---- 场景 12：注目使用真实技术支撑（非 -2% 机械位） ----
+        sup = page.evaluate("() => { const d=window.__lastD; if(!d) return null;"
+                            " return calcShortSupport(d.barsAll, d.val.price); }")
+        check(sup is not None, '支撑计算可在真实数据上执行')
+        if sup:
+            check(sup['type'] in ('pivot_cluster', 'pivot', '20d_low', 'none'),
+                  '支撑 type 合法', sup['type'])
+            if sup['type'] != 'none':
+                check(sup['price'] is not None, '有支撑时给出价格', sup)
+                if sup['type'] in ('pivot_cluster', 'pivot'):
+                    check(abs(sup['distancePct'] - 2.0) > 0.05,
+                          '支撑距离不是固定 -2%', 'distancePct=' + str(sup['distancePct']))
+        wt = page.evaluate("() => { const e=document.getElementById('hWatchB'); return e?e.innerText:''; }")
+        check(len(wt.strip()) > 0, '注目文案已生成', wt[:120].replace('\n', ' '))
+        n_items = page.evaluate("() => document.querySelectorAll('#hWatchB li').length")
+        check(n_items <= 3, '注目条目 <= 3', 'n=' + str(n_items))
+        check(n_items >= 1, '注目至少 1 条', 'n=' + str(n_items))
+
+        # ---- 场景 13：Hero 四象限「株価 × 信用買残」 ----
+        qt = page.evaluate("() => { const e=document.getElementById('hQuad');"
+                           " return e?e.innerText.replace(/\\s+/g,''):''; }")
+        check('株価' in qt, 'Hero 显示「株価」', qt)
+        check('信用買残' in qt, 'Hero 显示「信用買残」', qt)
+        check('×' in qt, 'Hero 显示 × 组合符', qt)
+        check(any(a in qt for a in ('↑', '↓', '→', '—')), 'Hero 显示方向箭头', qt)
+        reason = page.evaluate("() => { const e=document.getElementById('hQuadReason'); return e?e.innerText:''; }")
+        check(len(reason.strip()) > 0, 'Hero 显示结构原因小字', reason[:80])
+
+        # ---- 场景 14：注目 位于 Hero 之后、KPI 之前；KPI 在週次トレンド 之前 ----
+        order = page.evaluate(
+            "() => { const y=id=>{const e=document.getElementById(id);"
+            " return e? e.getBoundingClientRect().top + window.scrollY : null;};"
+            " return {hero:y('hero'), watch:y('hWatch'), kpis:y('hKpis'), wkTrend:y('wkTrend')}; }")
+        check(order['watch'] is not None, '注目元素存在')
+        if order['watch'] is not None:
+            check(order['hero'] <= order['watch'], '注目在 Hero 之后', order)
+            check(order['watch'] <= order['kpis'], '注目在 KPI 之前', order)
+            if order['wkTrend'] is not None:
+                check(order['kpis'] <= order['wkTrend'], 'KPI 在 週次トレンド 之前', order)
+
+        # ---- 场景 17：判定ロジック只存在于「信用残詳細」且默认收起 ----
+        scope = page.evaluate(
+            "() => {"
+            " const vc=document.getElementById('verdictCard');"
+            " const inDetail = !!(vc && vc.closest('#tab1'));"
+            " const det=document.querySelector('#tab1 details.fold');"
+            " const collapsed = det ? !det.open : null;"
+            " const home=document.getElementById('tab0');"
+            " const t=home?home.innerText:'';"
+            " return {inDetail, collapsed,"
+            "   homeHasVerdict: t.includes('この判定になった理由'),"
+            "   homeHasScore: t.includes('方向（多空倾向）')"
+            "     || t.includes('信用需給リスク')"
+            "     || t.includes('/ 100') || t.includes('/100')};"
+            " }")
+        check(scope['inDetail'], '判定ロジック容器位于「信用残詳細」(tab1)')
+        check(scope['collapsed'] is True, '判定ロジック默认收起（不展开）', scope)
+        check(not scope['homeHasVerdict'] and not scope['homeHasScore'],
+              '首页不含「判定理由」标题与内部分数(/100)', scope)
+
+        # ---- 场景 16：窄屏不溢出（仅 resize，不重新加载 → 不触发新上游请求） ----
+        page.set_viewport_size({'width': 380, 'height': 900})
+        page.wait_for_timeout(500)
+        ov = page.evaluate(
+            "() => { const ids=['hQuad','hWatch','hQuadReason']; const out={vw:window.innerWidth};"
+            " ids.forEach(id=>{const e=document.getElementById(id); if(e){const r=e.getBoundingClientRect();"
+            " out[id]={right:r.right, w:r.width};}}); return out; }")
+        for key in ('hQuad', 'hWatch', 'hQuadReason'):
+            if key in ov:
+                check(ov[key]['right'] <= ov['vw'] + 1, '窄屏 ' + key + ' 不溢出', ov[key])
+        page.set_viewport_size({'width': 1280, 'height': 1400})
+    except Exception as e:
+        check(False, '注目/四象限/位置/窄屏 综合异常', str(e)[:160])
+
+    # ---------- 场景 15：切换股票，注目支撑不残留 ----------
+    print('\n=== 场景 15：切换股票支撑不残留 ===')
+    # 复用本套件前面已加载过的代码（285A / 3905），避免引入「未缓存的新代码」
+    # 而额外打一次上游 Yahoo —— Yahoo 走公共代理，突发请求会 429（环境问题）。
+    try:
+        throttle(3000)
+        search(page, '3905')
+        wait_badge(page)
+        page.wait_for_timeout(900)
+        sup_b = page.evaluate("() => { const d=window.__lastD; return d?calcShortSupport(d.barsAll,d.val.price):null; }")
+        check(sup_b is not None, '切换后支撑可计算（3905）', sup_b)
+        # 快速来回切换，旧请求不覆盖
+        throttle(2000)
+        search(page, '285A')
+        page.wait_for_timeout(150)
+        search(page, '3905')
+        wait_badge(page)
+        page.wait_for_timeout(900)
+        st = page.evaluate("() => ({ code: window.__lastD? window.__lastD.val.code : null })")
+        check(st['code'] == '3905', '快速切换后最终为 3905（无旧请求覆盖）', str(st))
+    except Exception as e:
+        check(False, '切换股票残留异常', str(e)[:120])
 
     page.screenshot(path='/tmp/verify_final.png', full_page=True)
     browser.close()
