@@ -170,9 +170,43 @@ clear_all()
 orig_fgw = server.weekly.fetch_ganan_weekly
 server.weekly.fetch_ganan_weekly = lambda code, cache_dir, fresh=False: ([], {})
 
+
+# ★ A4.3 干净环境可复现性：
+#   degraded 的判定是 `bool(up_stale or not merged)` —— 只要「没有可用的週次数据」
+#   就是 True。原实现调用 build_weekly_response 时不传 cache_dir，
+#   于是它会落到**模块默认 .cache/** 上：
+#     · 本仓库跑：.cache/ 里已有週次缓存 → merged 非空 → degraded=False（通过）
+#     · 干净 checkout：.cache/ 不存在     → merged 为空 → degraded=True（失败）
+#   这属于**测试依赖了仓库里的既有缓存**，在干净环境不可复现。
+#   现在改为：显式传 cache_dir=SANDBOX，并在沙箱里种一份週次缓存，
+#   使本段完全自包含（不依赖任何仓库状态）。
+def _seed_weekly_cache(code, n=4):
+    import datetime as _dt
+    import json as _json
+    base = _dt.date(2026, 9, 4)          # 周五，保证 weekKey 连续
+    rows = []
+    for i in range(n):
+        d = base + _dt.timedelta(weeks=i)
+        rows.append({"weekKey": d.isoformat(),
+                     "snapshotDate": d.isoformat(),
+                     "weekEnding": d.isoformat(),
+                     "buy": 1_000_000 + i * 1000,
+                     "sell": 100_000 + i * 100,
+                     "ratio": round((1_000_000 + i * 1000) / (100_000 + i * 100), 2),
+                     "source": "seed", "splitConfirmed": False})
+    payload = {"weeklyParserVersion": server.weekly.WEEKLY_PARSER_VERSION,
+               "code": code, "rows": rows}
+    with open(os.path.join(SANDBOX, f"{code}_weekly.json"), "w",
+              encoding="utf-8") as f:
+        _json.dump(payload, f, ensure_ascii=False)
+
+
+_seed_weekly_cache("4519")
+
 stale_up = {"gen": 2, "fetched": True, "reused": False, "age": 0.0,
             "error": "boom", "stale": True}
-resp_s = server.weekly.build_weekly_response("4519", [], upstream=stale_up)
+resp_s = server.weekly.build_weekly_response("4519", [], upstream=stale_up,
+                                             cache_dir=SANDBOX)
 ok(resp_s.get("stale") is True, 'stale=True 透传到响应', resp_s.get('stale'))
 ok(resp_s.get("degraded") is True, 'degraded=True（降级）', resp_s.get('degraded'))
 ok(resp_s.get("lastSuccessfulUpdate") is None,
@@ -184,7 +218,8 @@ ok("dataAsOf" in resp_s, '响应含 dataAsOf 字段（数据所属日期）')
 
 ok_up = {"gen": 3, "fetched": True, "reused": False, "age": 0.0,
          "error": None, "stale": False}
-resp_o = server.weekly.build_weekly_response("4519", [], upstream=ok_up)
+resp_o = server.weekly.build_weekly_response("4519", [], upstream=ok_up,
+                                             cache_dir=SANDBOX)
 ok(resp_o.get("stale") is False, 'stale=False 透传', resp_o.get('stale'))
 ok(resp_o.get("degraded") is False, '非降级 degraded=False', resp_o.get('degraded'))
 ok(resp_o.get("lastSuccessfulUpdate") is not None,
