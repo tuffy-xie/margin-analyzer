@@ -118,6 +118,30 @@ python3 verify_ui.py        # 需要先启动本地服务（默认 http://127.0.
 | `1` | FAIL（存在失败断言 / 未确认错误） | ❌ |
 | `77` | **SKIP**（缺少外部夹具，断言未执行） | ❌ **不得计为通过** |
 
+### Playwright route / unroute 陷阱（务必具名 handler）
+
+```python
+page.route('**/api/weekly*', lambda route: route.abort())   # ❌ 匿名 lambda
+...
+page.unroute('**/api/weekly*')                              # ❌ 会摘掉全部 handler
+```
+
+`page.unroute(url)` **不传 handler 时移除该 pattern 下所有 handler** —— 包括
+场景外注册的正经 fixture `_serve_weekly`。后果极具迷惑性：该 URL 从此**直连真实本地服务**，
+
+- 冷启动（服务器无週次缓存）→ 真拉上游 → 迟迟不返回 → `#wkTrend` 卡「読み込み中」→ `wait_weekly` 超时；
+- 温跑（有缓存）→ 秒回 → **100% 通过**。
+
+表现为「偶发 flake」，实为测试缺陷，极易被误判成产品时序问题。正确写法：
+
+```python
+def _abort_weekly(route): route.abort()          # ✅ 具名
+page.route('**/api/weekly*', _abort_weekly)
+page.unroute('**/api/weekly*', _abort_weekly)     # ✅ 精确摘除
+```
+
+O4 场景已内置防回归断言（检查 `captured['weekly']` 确有增长），若 unroute 再次误伤会立刻 FAIL。
+
 ### 干净环境最小可复现方案
 
 JPX PDF（17MB 缓存目录）与 Ganan HTML 均**不进 Git**。拿到干净 checkout 后：
