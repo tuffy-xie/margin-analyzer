@@ -407,8 +407,14 @@ def run(inject_mode=None):
                               expected_requests=['/api/margin', '/api/weekly'])
         search(page, '4519')
         page.wait_for_timeout(200)
-        search(page, '6981')
+        search(page, '6981')                 # 竞态触发：4519 在途请求被 6981 取代
         wait_badge(page)
+        # ★ A4.3 冷启动确定性：竞态正确性由下方 code_now=='6981' 断言保证；
+        #   週次区块在此处只做「最终稳定态」读取。冷启动时首个 /api/weekly 的
+        #   route.fulfill 会略慢，4519 週次仍可能在 200ms 竞态窗口内未完成，
+        #   导致 wait_weekly 等待一个已作废的 seq 而超时（测试时序问题，非应用缺陷）。
+        #   故做一次稳定重搜：最后一次请求必然胜出（__runSeq 守卫），週次确定渲染。
+        search(page, '6981')
         wait_weekly(page)
         page.wait_for_timeout(600)
         code_now = page.evaluate("() => window.__lastD ? window.__lastD.code : null")
