@@ -277,6 +277,17 @@ def run(inject_mode=None):
             else:
                 route.fulfill(status=200, content_type='text/plain', body='offline')
 
+        def _abort_weekly(route):
+            """週次 abort handler。
+
+            ★ 必须是**具名**函数：page.unroute(url) 不传 handler 时会移除该 pattern 下
+              **所有** handler，包括上面注册的正经 fixture `_serve_weekly`，
+              导致后续场景的 /api/weekly 直连真实服务器（冷启动无缓存 → 週次请求迟迟不
+              返回 → wkTrend 卡在「読み込み中」→ wait_weekly 超时）。
+              具名后可用 page.unroute(url, _abort_weekly) 精确摘除。
+            """
+            route.abort()
+
         page.route('**/api/margin*', _serve_margin)
         page.route('**/api/weekly*', _serve_weekly)
         page.route('**r.jina.ai/**', _serve_proxy)
@@ -309,7 +320,7 @@ def run(inject_mode=None):
         # 预期请求：本场景明确 abort 的 /api/weekly
         page.goto(URL, wait_until='domcontentloaded')
         ledger.begin_scenario('O1-weekly-abort', expected_requests=['/api/weekly'])
-        page.route('**/api/weekly*', lambda route: route.abort())
+        page.route('**/api/weekly*', _abort_weekly)
         search(page, '4519')
         wait_badge(page)
         page.wait_for_timeout(2500)
@@ -334,7 +345,7 @@ def run(inject_mode=None):
               [(e['status'], e['reason']) for e in exp])
         ledger.end_scenario()
         try:
-            page.unroute('**/api/weekly*')
+            page.unroute('**/api/weekly*', _abort_weekly)   # ★ 只摘 abort，保留 _serve_weekly
         except Exception:
             pass
 
@@ -344,7 +355,7 @@ def run(inject_mode=None):
         ledger.begin_scenario('O2-sentinels',
                               sentinels=['NEG_SENTINEL_CONSOLE', 'NEG_SENTINEL_PAGEERROR'],
                               expected_requests=['/api/weekly'])
-        page.route('**/api/weekly*', lambda route: route.abort())
+        page.route('**/api/weekly*', _abort_weekly)
         search(page, '4519')
         wait_badge(page)
         page.wait_for_timeout(1500)
@@ -364,7 +375,7 @@ def run(inject_mode=None):
               'O2：哨兵被记录且因场景注册而归因为 expected')
         ledger.end_scenario()
         try:
-            page.unroute('**/api/weekly*')
+            page.unroute('**/api/weekly*', _abort_weekly)   # ★ 只摘 abort，保留 _serve_weekly
         except Exception:
             pass
 
@@ -409,14 +420,16 @@ def run(inject_mode=None):
         page.wait_for_timeout(200)
         search(page, '6981')                 # 竞态触发：4519 在途请求被 6981 取代
         wait_badge(page)
-        # ★ A4.3 冷启动确定性：竞态正确性由下方 code_now=='6981' 断言保证；
-        #   週次区块在此处只做「最终稳定态」读取。冷启动时首个 /api/weekly 的
-        #   route.fulfill 会略慢，4519 週次仍可能在 200ms 竞态窗口内未完成，
-        #   导致 wait_weekly 等待一个已作废的 seq 而超时（测试时序问题，非应用缺陷）。
-        #   故做一次稳定重搜：最后一次请求必然胜出（__runSeq 守卫），週次确定渲染。
+        n_wk = len(captured['weekly'])
         search(page, '6981')
         wait_weekly(page)
         page.wait_for_timeout(600)
+        # ★ 回归守卫：上面的 unroute 若再次误伤 _serve_weekly，/api/weekly 会直连真实
+        #   服务器（冷启动无缓存 → 週次迟迟不返回 → wkTrend 卡「読み込み中」→ wait_weekly 超时）。
+        #   这里断言週次请求确实走了 mock fixture，把这层失效显式挡住。
+        check(len(captured['weekly']) > n_wk,
+              'O4：週次请求仍走离线 mock（unroute 未误伤 fixture handler）',
+              (n_wk, len(captured['weekly'])))
         code_now = page.evaluate("() => window.__lastD ? window.__lastD.code : null")
         check(code_now == '6981', 'O4：快速切换后最终为最后请求的代码 6981', code_now)
         # 连续刷新（同一代码）
@@ -469,7 +482,7 @@ def run(inject_mode=None):
             elif inject_mode == 'pageerror':
                 page.evaluate("(function(){ setTimeout(function(){ throw new Error('NEG_UNEXPECTED_PAGEERROR_ZZZ'); }, 0); })()")
             elif inject_mode == 'unrelated':
-                page.route('**/api/weekly*', lambda route: route.abort())
+                page.route('**/api/weekly*', _abort_weekly)
                 # 无关请求：用 route abort 造成真正的网络失败（404 不会触发）
                 page.route('**/api/probe-unrelated*', lambda route: route.abort())
                 page.evaluate("fetch('/api/probe-unrelated').catch(function(){});")
@@ -479,6 +492,10 @@ def run(inject_mode=None):
             if new_entries:
                 injected_entry = new_entries[0]
             ledger.end_scenario()
+            try:
+                page.unroute('**/api/weekly*', _abort_weekly)   # ★ 只摘 abort，保留 _serve_weekly
+            except Exception:
+                pass
 
         # ================= O6：A4.1 比較期間 / 期間株価騰落率 标签（DOM 级） =================
         scen('O6：A4.1 信用残比較期間 标签与引擎窗口一致')
