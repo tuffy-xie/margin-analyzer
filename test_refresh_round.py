@@ -56,7 +56,7 @@ def restore():
 def fresh_sandbox(days):
     """清空进程缓存 / 上游状态 / 磁盘缓存，并建立 days 个假 PDF。"""
     server.MEM.clear()
-    server.MEM_META.clear()
+    server.MEM_META.clear(); server.MEM_STALE.clear()
     server.reset_upstream()
     for f in os.listdir(SANDBOX):
         os.unlink(os.path.join(SANDBOX, f))
@@ -124,7 +124,7 @@ if True:
            'A 整轮上游抓取次数 = 1', server.UPSTREAM_STATS['indexFetches'])
 
         # --- 修正后的前端：a=1 / a=2 用 fresh=0，同样只能抓 1 次 ---
-        server.MEM.clear(); server.MEM_META.clear()
+        server.MEM.clear(); server.MEM_META.clear(); server.MEM_STALE.clear()
         rows1b, up1b = server.gather('7974', 15, fresh=False)
         ok(len(rows1b) == 3, 'A 修正前端 a=1（fresh=0）也拿到数据', len(rows1b))
         rows2b, up2b = server.gather('7974', 15, fresh=False)
@@ -134,7 +134,7 @@ if True:
 
         # --- 并发：两个线程同时 fresh=1，也只能抓 1 次 ---
         server.reset_upstream()
-        server.MEM.clear(); server.MEM_META.clear()
+        server.MEM.clear(); server.MEM_META.clear(); server.MEM_STALE.clear()
         state['phase'] = 1
         res = {}
 
@@ -185,7 +185,7 @@ if True:
         ok(server.UPSTREAM_STATS['indexFetches'] == 1,
            'B 上游抓取总数 = 1', server.UPSTREAM_STATS['indexFetches'])
         # 修正前端（a=0 fresh / a=1,2 非 fresh）同样只允许 1 次
-        server.reset_upstream(); server.MEM.clear(); server.MEM_META.clear()
+        server.reset_upstream(); server.MEM.clear(); server.MEM_META.clear(); server.MEM_STALE.clear()
         state['n'] = 0
         got2 = []
         for a in range(3):
@@ -218,8 +218,13 @@ if True:
         r2, u2 = server.gather('7974', 15, fresh=False)
         r3, u3 = server.gather('7974', 15, fresh=False)
         ok(r2 == r1 and r3 == r1, 'C 后续查询结果与首次一致（行为不变）')
-        ok(u2 is None and u3 is None,
-           'C 后续查询命中进程缓存 → 完全不触碰上游', (u2, u3))
+        # ★ A3.2（issue B）：缓存命中不再返回 None，而是返回一个
+        #   upstream_meta（fetched=False / reused=True），以便 stale 状态
+        #   能随缓存一起透传、不偷偷变 False。本断言的目的是验证
+        #   「缓存命中完全不触碰上游」—— 现在用 fetched=False + reused=True 表达。
+        ok(u2 is not None and u2.get('fetched') is False and u2.get('reused') is True
+           and u3 is not None and u3.get('fetched') is False and u3.get('reused') is True,
+           'C 后续查询命中进程缓存 → 零上游开销（fetched=False, reused=True，stale 沿用）', (u2, u3))
         ok(server.UPSTREAM_STATS['indexFetches'] == f_after_first,
            'C 后续查询未新增上游抓取', server.UPSTREAM_STATS['indexFetches'])
 
@@ -230,7 +235,7 @@ if True:
            'C 换股票不额外抓上游', server.UPSTREAM_STATS['indexFetches'])
 
         # 日期 fallback 语义不变：最新日缺失时仍用前一公表日
-        server.MEM.clear(); server.MEM_META.clear()
+        server.MEM.clear(); server.MEM_META.clear(); server.MEM_STALE.clear()
         for f in os.listdir(SANDBOX):
             if f.startswith('7974_'):
                 os.unlink(os.path.join(SANDBOX, f))   # 去掉 JSON 缓存，强制真解析
@@ -243,9 +248,9 @@ if True:
 
         # warm cache 的 fresh=1：不得重解析没变的 PDF（这是 117s 的根因）
         server.parse_pdf = fake_parse(records)
-        server.MEM.clear(); server.MEM_META.clear()
+        server.MEM.clear(); server.MEM_META.clear(); server.MEM_STALE.clear()
         server.gather('7974', 15, fresh=False)   # 把 3 天的 JSON 缓存都补齐
-        server.MEM.clear(); server.MEM_META.clear()
+        server.MEM.clear(); server.MEM_META.clear(); server.MEM_STALE.clear()
         server.reset_upstream()
         p_before = server.UPSTREAM_STATS['parses']
         h_before = server.UPSTREAM_STATS['cacheHits']
@@ -261,7 +266,7 @@ if True:
         # 反例：PDF 真的变了（指纹不同）→ 必须重新解析
         with open(os.path.join(SANDBOX, f'{DAYS[0]}_mtall.pdf'), 'wb') as f:
             f.write(b'%PDF-1.4\n' + b'y' * 9000 + b'\n%%EOF\n')
-        server.MEM.clear(); server.MEM_META.clear()
+        server.MEM.clear(); server.MEM_META.clear(); server.MEM_STALE.clear()
         p_before2 = server.UPSTREAM_STATS['parses']
         server.gather('7974', 15, fresh=True)
         ok(server.UPSTREAM_STATS['parses'] - p_before2 == 1,
@@ -335,7 +340,7 @@ if True:
         server._upstream['ts'] -= 9999
         server.list_available = lambda limit=15: (_ for _ in ()).throw(
             OSError('JPX 不可达'))
-        server.MEM.clear(); server.MEM_META.clear()
+        server.MEM.clear(); server.MEM_META.clear(); server.MEM_STALE.clear()
         rows, up = server.gather('7974', 15, fresh=True)
         ok(len(rows) == 3, 'D3 降级后仍有数据可用', len(rows))
         ok(up and up['stale'] is True, 'D3 明确标记 stale', up)
@@ -365,7 +370,7 @@ if True:
         server._upstream['ts'] -= 9999
         server.list_available = lambda limit=15: list(
             [(d, f'http://unused/{d}.pdf') for d in DAYS])
-        server.MEM.clear(); server.MEM_META.clear()
+        server.MEM.clear(); server.MEM_META.clear(); server.MEM_STALE.clear()
         rows, up = server.gather('7974', 15, fresh=True)
         ok(up and up['stale'] is False and up['fetched'] is True,
            'D4 上游恢复 → 重新成功刷新', up)

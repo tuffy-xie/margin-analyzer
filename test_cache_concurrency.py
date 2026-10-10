@@ -40,7 +40,7 @@ REAL_CACHE = server.CACHE_DIR
 SANDBOX = tempfile.mkdtemp(prefix='ma_cache_test_')
 server.CACHE_DIR = SANDBOX
 server.MEM.clear()
-server.MEM_META.clear()
+server.MEM_META.clear(); server.MEM_STALE.clear()
 
 
 def restore():
@@ -190,7 +190,7 @@ if True:
 print('\n=== issue 7：失败 / 空结果不得写入 MEM ===')
 if True:
     server.MEM.clear()
-    server.MEM_META.clear()
+    server.MEM_META.clear(); server.MEM_STALE.clear()
     day2 = '20260102'
     pdf2 = os.path.join(SANDBOX, f'{day2}_mtall.pdf')
     make_fake_pdf(pdf2)
@@ -220,7 +220,7 @@ if True:
 print('\n=== issue 7：旧请求不得覆盖新缓存 ===')
 if True:
     server.MEM.clear()
-    server.MEM_META.clear()
+    server.MEM_META.clear(); server.MEM_STALE.clear()
     key = '7974:5'
     new_rows = [{'date': '2026-01-02', 'buy': 200000, 'sell': 1000}]
     old_rows = [{'date': '2026-01-01', 'buy': 100000, 'sell': 900}]

@@ -333,6 +333,17 @@
   .heroQuad .hqArr.flat{color:var(--sub)}
   .heroQuad .hqArr.na{color:var(--sub);font-size:14px}
   .heroQuadReason{font-size:12.5px;color:var(--txt);line-height:1.6;margin-top:2px}
+  /* A4.1：比较期間 + 期间股价騰落率 —— 紧邻四象限，明确绑定窗口，杜绝"当日涨跌"误读 */
+  .heroCmp{font-size:12px;line-height:1.7;color:var(--sub);margin:2px 0 6px;
+    padding:6px 9px;background:var(--card2);border:1px solid var(--line);border-radius:9px}
+  .heroCmp .cmpKey{color:var(--txt);font-weight:700}
+  .heroCmp .cmpDate{color:var(--txt);font-weight:700;letter-spacing:.02em}
+  .heroCmp .cmpVal{font-weight:800}
+  .heroCmp .cmpUp{color:var(--sell)}      /* JP: 上昇=赤 */
+  .heroCmp .cmpDown{color:var(--buy)}     /* JP: 下落=緑 */
+  .heroCmp .cmpFlat{color:var(--sub)}
+  .heroCmp .cmpLack{color:var(--sub);font-weight:700}
+  .heroCmp .cmpSep{opacity:.55;margin:0 6px}
 
   /* ---- 底部 Tab ---- */
   @media(max-width:640px){ .wide-only{display:none} }
@@ -421,6 +432,8 @@
       <div class="heroBadge" id="hBadge">読み込み中…</div>
       <div class="heroQuad" id="hQuad"></div>
       <div class="heroQuadReason" id="hQuadReason"></div>
+      <!-- A4.1：把「株価↑」明确绑定到信用残比較期間，避免被误读为当日涨跌 -->
+      <div class="heroCmp" id="hCmp"></div>
       <div class="heroPos" id="hPos"></div>
       <div class="heroWhy" id="hWhy"></div>
     </div>
@@ -687,6 +700,10 @@ async function run(forceFresh){
   //   否则切换失败/缓慢时会看到「名字是新的、图还是旧的」。
   clearCharts();
   clearAnalysisPanels();
+  // ★ A3.2（Issue 五/1）：新查询一开始，旧的查询结果（含上一只股票的週次/分析）
+  //   不得继续冒充当前结果。先作废，等本次成功 render 后再重新赋值。
+  window.__lastWeekly = null;
+  window.__lastD = null;
   $('tbody').innerHTML = '<tr><td colspan="4" class="empty"><span class="spin"></span>加载中…</td></tr>';
 
   // 估值数据始终走 Ganan（PER/PBR/配当）
@@ -747,7 +764,9 @@ async function run(forceFresh){
     render(d);
 
     // 週次トレンド（独立抓取，竞态由 mySeq 守卫；失败不影响本页）
-    fetchWeekly(code, mySeq);
+    // ★ A3.2（Issue A）：主动刷新时把刷新意图一并传给週次接口，
+    //   否则点「刷新」只刷新了日次、週次仍用旧缓存。
+    fetchWeekly(code, mySeq, !!forceFresh);
 
     // 详细页：完整数据范围与公表时机
     const sr = document.getElementById('srcRange');
@@ -775,9 +794,16 @@ async function run(forceFresh){
     //   会把新股票已经渲染好的页面覆盖成「抓取失败」。
     if (mySeq !== __runSeq) return;
     console.error(e);
-    setStatus('err','抓取失败：' + (e.message||e));
+    // ★ A3.2（Issue D）：明确区分失败来源。用户显式选择 Ganan 但 Ganan 取得失败
+    //   时，绝不能静默显示旧 JPX 分析，必须如实告知「Ganan 取得失败」。
+    var why = (e && e.message) ? e.message : String(e);
+    if (SRC_MODE === 'ganan') {
+      setStatus('err', 'Ganan データ取得失敗（Ganan 周次に切替えられませんでした）：' + why);
+    } else {
+      setStatus('err', '抓取失败：' + why);
+    }
     $('tbody').innerHTML = '<tr><td colspan="4" class="empty">无数据</td></tr>';
-    // 新股票没有行情 → 清空旧图表，绝不保留上一只股票的图
+    // 新股票没有行情 → 清空旧图表与旧数据源标签，绝不保留上一只股票的图/结论
     clearCharts();
     clearAnalysisPanels();
   }
@@ -801,6 +827,11 @@ function clearAnalysisPanels(){
   set('hQuadReason', '');
   set('hFacts', '');
   set('hKpis', '<div class="kpi"><div class="k">読み込み中</div><div class="v">—</div></div>');
+  // ★ A3.2（Issue D）：数据源标签也必须清空，否则切换 Ganan 失败后
+  //   会残留上一只股票（JPX 官方）的「JPX 官方」标签，误导用户以为仍是 JPX 分析。
+  set('srcLabel', '—');
+  set('srcFreq', '—');
+  set('srcRange2', '—');
   const w = $('hWatch'); if (w) w.style.display = 'none';
   const n = document.getElementById('name'); if (n) n.textContent = '—';
   const c = document.getElementById('codeLbl'); if (c) c.textContent = '';
@@ -825,8 +856,9 @@ const WK_PERIODS = [
   { key:'w13', label:'13週', req:14 },
 ];
 
-function fetchWeekly(code, seq){
-  const url = MA_OFFICIAL.LOCAL_API + '/api/weekly?code=' + encodeURIComponent(code);
+function fetchWeekly(code, seq, forceFresh){
+  const url = MA_OFFICIAL.LOCAL_API + '/api/weekly?code=' + encodeURIComponent(code) +
+              (forceFresh ? '&fresh=1' : '');
   const ctrl = new AbortController();
   const t = setTimeout(function(){ ctrl.abort(); }, 60000);
   fetch(url, { signal: ctrl.signal })
@@ -843,7 +875,11 @@ function fetchWeekly(code, seq){
     })
     .catch(function(e){
       clearTimeout(t);
-      if (seq !== __runSeq) return;                 // 竞态：丢弃旧请求的失败
+      if (seq !== __runSeq) return;                 // 竞态：丢弃旧请求的失败（含迟到的旧响应）
+      // ★ A3.2（Issue C）：同一代码连续刷新失败 → 不得残留旧 weekly 结果。
+      //   主动刷新失败意味着无法确认「最新」，刷新前的 __lastWeekly 必须作废，
+      //   否则 renderDataSrc 会把上一轮（刷新前）的週次数据重新贴上页面。
+      if (forceFresh) window.__lastWeekly = null;
       const el = document.getElementById('wkTrend');
       if (el) el.innerHTML = '<div class="wkfail">週次データ取得失敗（ページ其余功能は通常通り動作）</div>';
       const f = document.getElementById('wkFoot'); if (f) f.textContent = '';
@@ -859,14 +895,33 @@ function renderWeeklyTrend(resp){
   let html = '';
   for (const p of WK_PERIODS){
     const t = tr[p.key];
-    html += '<div class="wkrow' + (t && t.corporateActionAffected ? ' stop' : '') + '">';
+    // ★ A2：三种「不可用」不是一回事，必须分开表达
+    //   优先级：corporate action > missing week > insufficient history > normal
+    const ca = !!(t && t.corporateActionAffected);
+    const reason = t ? t.reason : null;
+    html += '<div class="wkrow' + (ca ? ' stop' : '') + '">';
     html += '<span class="wk">' + p.label + '</span>';
-    if (!t || !t.available){
-      html += '<span class="wkval">データ蓄積中</span>';
-      html += '<span class="wkr">（' + cov + '/' + p.req + '週）</span>';
-    } else if (t.corporateActionAffected){
+    if (ca){
       html += '<span class="wkval">比較停止</span>';
-      html += '<span class="wksub">株式分割・併合の影響</span>';
+      // ★ A3.1：confirmed（精确事件）与 suspected（週次推测）文案不同，
+      //   绝不可把「疑似」说成「已确认」。
+      const caConf = (t && t.caConfidence) || 'suspected';
+      html += '<span class="wksub">' + (caConf === 'confirmed'
+        ? '株式分割・併合の影響'
+        : '株式分割・併合の可能性があるため比較停止') + '</span>';
+    } else if (!t || !t.available){
+      if (reason === 'missing_week'){
+        // 中间缺周：绝不跨缺周计算，也不用更早快照顶替
+        const mw = (t && t.missingWeeks) ? t.missingWeeks : [];
+        html += '<span class="wkval">比較不能</span>';
+        html += '<span class="wksub">週次データ欠損' +
+                (mw.length ? '（' + mw.length + '週）' : '') + '</span>';
+      } else {
+        // 历史尚未积累够 —— 保持原有「データ蓄積中（N/14週）」
+        const present = (t && t.weeksPresent != null) ? t.weeksPresent : cov;
+        html += '<span class="wkval">データ蓄積中</span>';
+        html += '<span class="wkr">（' + present + '/' + p.req + '週）</span>';
+      }
     } else {
       const bp = t.buyPct;
       const col = (bp == null) ? 'var(--sub)' : (bp < 0 ? 'var(--ok)' : (bp > 0 ? 'var(--warn)' : 'var(--sub)'));
@@ -875,8 +930,18 @@ function renderWeeklyTrend(resp){
       const rt = (t.ratioTo   == null) ? '—' : t.ratioTo.toFixed(1);
       html += '<span class="wkval" style="color:' + col + '">買残 ' + bpTxt + '</span>';
       html += '<span class="wkr">倍率 ' + rf + ' → ' + rt + '</span>';
+      // 当前自然周尚未结束 → 弱提示「暫定」，不假装是完整周
+      if (t.provisional){
+        const sd = t.toDate ? t.toDate.slice(5).replace('-', '/') : '';
+        html += '<span class="wksub">暫定' + (sd ? '（' + sd + '時点）' : '') + '</span>';
+      }
     }
     html += '</div>';
+  }
+  // ★ A3.2（Issue B/D）：上游刷新失败 → 週次数据来自降级缓存，必须明示，
+  //   不得把降级数据伪装成最新。stale 由 /api/weekly 透传（详见 server.py gather）。
+  if (resp.stale){
+    html += '<div class="wkfail" style="margin-top:6px">⚠️ 週次データは降级缓存（上游刷新失敗）— 最新ではありません</div>';
   }
   box.innerHTML = html;
 
@@ -886,6 +951,15 @@ function renderWeeklyTrend(resp){
     const src = resp.sources || {};
     const mixed = src.ganan && src.ganan.weeks > 0 && src.jpx && src.jpx.weeks > 0;
     if (mixed) s += '<br><span class="mix">一部期間に外部集計データを使用</span>';
+    // ★ A2：最新週が未完了なら弱く明示（週次は weekKey  anchoring、snapshotDate は実データ日）
+    if (resp.latestProvisional && resp.latestSnapshotDate){
+      s += '<br><span class="mix">最新週は暫定（' +
+           resp.latestSnapshotDate.slice(5).replace('-', '/') + '時点）</span>';
+    }
+    if (resp.stale){
+      s += '<br><span class="mix">データ所属：' + (resp.dataAsOf || '—') +
+           '　最終成功更新：' + (resp.lastSuccessfulUpdate || '失敗により未更新') + '</span>';
+    }
     foot.innerHTML = s;
   }
 }
@@ -931,11 +1005,21 @@ function renderWeeklyChart(resp){
   if (kpi){
     const last = rows[rows.length - 1];
     const rv = (last && last.ratio != null) ? last.ratio.toFixed(2) : '—';
-    kpi.innerHTML = '最新倍率：<b style="color:var(--ratio)">' + rv + '</b>　序列：' +
-                    rows.length + '週（週次履歴 ' + (resp.coverageWeeks || 0) + '週）';
+    let h = '最新倍率：<b style="color:var(--ratio)">' + rv + '</b>　序列：' +
+            rows.length + '週（週次履歴 ' + (resp.coverageWeeks || 0) + '週）';
+    // ★ A3.1：会社行為影响区间存在时，明确提示「前后比较的解释已停止」，
+    //   原始股数仅供审计，不可当作正常买卖增减趋势解读。
+    if (resp.corporateActionAffected){
+      const caConf = resp.caConfidence || 'suspected';
+      h += '　<span style="color:var(--warn)">※ 会社行為（' +
+           (caConf === 'confirmed' ? '分割・併合検出' : '分割・併合の可能性') +
+           '）の影響区間を含むため、前後比較の解釈は停止</span>';
+    }
+    kpi.innerHTML = h;
   }
   const sub = document.getElementById('wkDetailSub');
-  if (sub) sub.textContent = '全週次序列（' + rows.length + '週）';
+  if (sub) sub.textContent = '全週次序列（' + rows.length + '週）' +
+        (resp.corporateActionAffected ? '　⚠ 会社行為影响区间：比较停止' : '');
 }
 
 async function buildAnalysis(code, val, rows, srcMeta){
@@ -1196,8 +1280,10 @@ function renderHero(d){
   chgEl.textContent = '';
   chgEl.style.color = 'var(--sub)';
 
-  const pc = q.priceChg!=null ? q.priceChg
-            : (d.val.priceChgAligned!=null ? d.val.priceChgAligned : null);
+  // ★ A4.1：首页"株価方向"严格绑定引擎实际使用的比较窗口（= 四象限的 priceChg），
+  //   绝不与"当日涨跌"或别的窗口混用。q.priceChg 为 null（窗口两端缺行情）时
+  //   不回退到 priceChgAligned（那是整窗首尾，语义不同，会跟空的四象限矛盾）。
+  const pc = q.priceChg;
 
   /* --- ④ 核心结构原因：股价方向 × 信用買残方向 ---
      用 engine 已算好的 priceChg / buyChg 直接呈现四象限形态，
@@ -1212,6 +1298,68 @@ function renderHero(d){
       quadEl.innerHTML = renderQuadrant(q);
       // 下一行用较小文字说明结构（复用 engine 的 quadrant.text，不自造结论）
       if (quadReasonEl) quadReasonEl.textContent = q.text || '';
+    }
+  }
+
+  /* --- ④a A4.1：信用残比較期間 + 期間株価騰落率（紧邻四象限） ---
+     把"株価↑"严格绑定到引擎实际使用的比较窗口 cmp.from → cmp.to，
+     与"当日涨跌"彻底分离。数据不足时如实显示，绝不编造日期/百分比。 */
+  const cmpEl = $('hCmp');
+  if (cmpEl) {
+    const c = i.comparison;   // 本块内局部引用，避免与下方 const cmp 声明冲突
+    const cmpOk = c && c.from && c.to;
+    if (!cmpOk) {
+      // 无法取得可靠的比较起止日期 → 不得编造，明确告知
+      cmpEl.innerHTML = '<span class="cmpLack">比較期間：データ不足</span>';
+    } else {
+      // ★ A4.1.1：股价日期溯源 —— 取「真正参与比较窗口计算」的两端价格观测日。
+      //   comparisonWindow 已返回 fromIdx/toIdx；d.rows 与引擎用的是同一数组，
+      //   故 d.rows[fromIdx].priceDate / d.rows[toIdx].priceDate 即实际参与 priceChg 的两端行情日。
+      //   规则（严禁用信用残日期冒充价格日期）：
+      //   ① 两端价格日与信用残日完全一致（isSameDate）→ 不显示额外提示；
+      //   ② 任一端发生回退（priceDate 落在信用残日之前）→ 显示真实「株価参照期間」；
+      //   ③ 任一端价格日缺失 → 显示「データ不足」，绝不拿信用残日期顶替。
+      const rowsForCmp = d.rows || [];
+      const _fi = (c.fromIdx != null) ? c.fromIdx : 0;
+      const _ti = (c.toIdx != null) ? c.toIdx : (rowsForCmp.length - 1);
+      const _pf = (rowsForCmp[_fi] && rowsForCmp[_fi].priceDate != null) ? rowsForCmp[_fi].priceDate : null;
+      const _pt = (rowsForCmp[_ti] && rowsForCmp[_ti].priceDate != null) ? rowsForCmp[_ti].priceDate : null;
+      const _priceFellBack = (_pf != null && _pf !== c.from) || (_pt != null && _pt !== c.to);
+      const _priceMissing  = (_pf == null) || (_pt == null);
+
+      // 方向判定被停止（会社行動 / 判定不能）时，期间涨跌幅也不可信，
+      // 只显示真实比较期間，涨跌幅一律留 "—"，杜绝"方向停了却还显示 +x%"。
+      const rateReliable = !(q.key === 'corporateAction' || q.key === 'unknown');
+      const pct = (rateReliable && pc != null) ? (pc > 0 ? '+' : '') + pc + '%' : '—';
+      const arrow = (!rateReliable || pc == null) ? '→'
+        : (pc > 0.5 ? '↗ 上昇' : (pc < -0.5 ? '↘ 下落' : '→ 横ばい'));
+      const cls = (!rateReliable || pc == null) ? 'cmpFlat'
+        : (pc > 0.5 ? 'cmpUp' : (pc < -0.5 ? 'cmpDown' : 'cmpFlat'));
+
+      // 株価参照期間：仅当价格日回退或缺缺失时追加显示（与信用残期間区分）
+      let refHtml = '';
+      if (_priceMissing) {
+        refHtml = '<span class="cmpKey">株価参照期間：</span>' +
+                  '<span class="cmpLack">データ不足</span>';
+      } else if (_priceFellBack) {
+        refHtml = '<span class="cmpKey">株価参照期間：</span>' +
+                  '<span class="cmpDate">' + MA.shortMD(_pf) + '</span>' +
+                  '<span class="cmpSep">～</span>' +
+                  '<span class="cmpDate">' + MA.shortMD(_pt) + '</span>';
+      }
+      // _priceFellBack 为 false（两端价格日 == 信用残日）→ refHtml 留空，不显示额外提示
+
+      cmpEl.innerHTML =
+        '<span class="cmpKey">信用残比較期間：</span>' +
+        '<span class="cmpDate">' + MA.shortMD(c.from) + '</span>' +
+        '<span class="cmpSep">～</span>' +
+        '<span class="cmpDate">' + MA.shortMD(c.to) + '</span>' +
+        '<span class="cmpSep">（' + c.periods + '期）</span>' +
+        (refHtml ? '<br>' + refHtml : '') +
+        '<br>' +
+        '<span class="cmpKey">期間株価騰落率：</span>' +
+        '<span class="cmpVal ' + cls + '">' + pct + '</span>' +
+        '<span class="cmpVal ' + cls + '">' + arrow + '</span>';
     }
   }
 
@@ -1254,7 +1402,7 @@ function renderHero(d){
     ? MA.shortMD(cmp.from) + ' → ' + MA.shortMD(cmp.to) + '（' + cmp.periods + '期）'
     : '';
   $('hFacts').innerHTML =
-    '<div class="fact"><span class="fl">信用残同期株価'+
+    '<div class="fact"><span class="fl">期間株価騰落率'+
         (dRange?' <small class="frange">'+dRange+'</small>':'')+'</span>'+
       '<span class="fv">'+(pc!=null?(pc>0?'+':'')+pc+'%':'—')+'</span>'+
       '<span class="fa" style="color:'+(pc>0?'var(--sell)':'var(--buy)')+'">'+
@@ -1461,7 +1609,8 @@ function renderQuadrant(q){
     return { s:'→', c:'flat' };
   };
   const pa = arr(q.priceChg), ba = arr(q.buyChg);
-  return cell('株価', pa.s, pa.c) + '<span class="hqX">×</span>' +
+  // A4.1：把"株価"明确写成"期間株価"，避免被读成当日涨跌
+  return cell('期間株価', pa.s, pa.c) + '<span class="hqX">×</span>' +
          cell('信用買残', ba.s, ba.c);
 }
 
@@ -1665,7 +1814,14 @@ function renderDataSrc(d){
   if (wk) {
     const cov = wk.coverageWeeks || (wk.rows ? wk.rows.length : 0);
     const w13 = wk.trends ? wk.trends.w13 : null;
-    if (w13 && w13.available) {
+    // ★ A3.1：会社行為影响优先于「蓄積中」—— 首页说「比較停止」，此处不可写成
+    //   「データ蓄積中」误导用户以为历史不足、只差几周。
+    if (w13 && w13.corporateActionAffected) {
+      const caConf = w13.caConfidence || 'suspected';
+      s += krow('13週トレンド',
+        '比較停止（' + (caConf === 'confirmed' ? '株式分割・併合の影響' : '会社行動の可能性') + '）',
+        'warn');
+    } else if (w13 && w13.available) {
       s += krow('13週トレンド', '利用可能（' + cov + '週 蓄積済）', 'ok');
     } else {
       s += krow('13週トレンド', 'データ蓄積中（' + cov + '/14週）', 'warn');
@@ -1674,6 +1830,18 @@ function renderDataSrc(d){
     if (wk.sources && wk.sources.ganan && wk.sources.ganan.weeks > 0) srcs.push('Ganan 週次');
     if (wk.sources && wk.sources.jpx && wk.sources.jpx.weeks > 0) srcs.push('JPX 日次の週次化');
     s += krow('週次出所', srcs.length ? srcs.join(' + ') : '—');
+    // ★ A3.2（Issue B/D）：週次数据若来自降级缓存（上游刷新失败），必须明示，
+    //   不能让「13週トレンド 利用可能」看起来像「已确认最新」。
+    if (wk.stale) {
+      s += krow('　週次ステータス', '降级缓存（上游刷新失敗 → 非最新）', 'warn');
+    }
+    // ★ A3.1：会社行為影响时，在卡内明确提示「前后比较的解释已停止」
+    if (wk.corporateActionAffected) {
+      const caConf = wk.caConfidence || 'suspected';
+      s += krow('　会社行為', (caConf === 'confirmed'
+        ? '株式分割・併合を検出。週次前後比較の解釈を停止'
+        : '株式分割・併合の可能性。週次前後比較の解釈を停止'), 'warn');
+    }
   } else {
     s += krow('13週トレンド', '週次データ準備中…', 'warn');
     s += krow('週次出所', '—');
@@ -1683,7 +1851,10 @@ function renderDataSrc(d){
             d.pts && d.pts.bpsVerified ? 'ok' : 'warn');
   if (wk) {
     const w13 = wk.trends ? wk.trends.w13 : null;
-    if (w13 && w13.available && w13.buyPct != null) {
+    // ★ A3.1：会社行為影响时，绝不可把受影响区间的原始变化百分比当作可解释的趋势展示
+    if (w13 && w13.corporateActionAffected) {
+      s += krow('13週前比', '比較停止（会社行為の影響）', 'warn');
+    } else if (w13 && w13.available && w13.buyPct != null) {
       s += krow('13週前比', '買残 ' + (w13.buyPct > 0 ? '+' : '') + w13.buyPct + '%');
     } else {
       s += krow('13週前比', '—（13週データ蓄積中）');
@@ -1835,11 +2006,17 @@ function renderIndicators(d){
   });
 
   /* 4 買残変化 */
+  // ★ A3.1：週次会社行為影响时，指标卡的「13週前比」也必须停释（仅显示层拦截，
+  //   不改 engine2.js 的 A1 判定逻辑）。会社行為的週次比较已在 /api/weekly 停止。
+  const wkCA13 = !!(window.__lastWeekly && window.__lastWeekly.trends
+                    && window.__lastWeekly.trends.w13
+                    && window.__lastWeekly.trends.w13.corporateActionAffected);
+  const ca13wTxt = '<span class="na">比較停止（会社行為の影響）</span>';
   items.push({
     k:'4', n:'信用買残変化',
     val: wan(i.long.value)+'<small> 万株</small>',
     d: '前日 '+fmtChg(i.long.chg1)+'｜'+spTxt+' '+fmtChg(i.long.chgN)+'<br>'+
-       '13週前比 '+(i.long.chg13w!=null?fmtChg(i.long.chg13w):'<span class="na">无周次数据</span>'),
+       '13週前比 '+(wkCA13 ? ca13wTxt : (i.long.chg13w!=null?fmtChg(i.long.chg13w):'<span class="na">无周次数据</span>')),
     bar: '',
   });
 
@@ -1848,18 +2025,18 @@ function renderIndicators(d){
     k:'5', n:'信用売残変化',
     val: wan(i.short.value)+'<small> 万株</small>',
     d: '前日 '+fmtChg(i.short.chg1)+'｜'+spTxt+' '+fmtChg(i.short.chgN)+'<br>'+
-       '13週前比 '+(i.short.chg13w!=null?fmtChg(i.short.chg13w):'<span class="na">无周次数据</span>'),
+       '13週前比 '+(wkCA13 ? ca13wTxt : (i.short.chg13w!=null?fmtChg(i.short.chg13w):'<span class="na">无周次数据</span>')),
     bar: '',
   });
 
-  /* 6 株価変化 */
+  /* 6 期間株価騰落率（A4.1：与首页用语一致，明确是"比较期間"而非当日） */
   const q = i.quadrant;
   items.push({
-    k:'6', n:'株価変化',
+    k:'6', n:'期間株価騰落率',
     val: q.priceChg!=null ? (q.priceChg>0?'+':'')+q.priceChg+'<small> %</small>' : '—',
     d: q.priceChg!=null
-      ? '对比 '+spTxt+'前<br><span style="color:var(--sub)">用于与信用残方向做四象限判断</span>'
-      : '<span class="na">行情数据不足</span>',
+      ? '对比 '+spTxt+'前（信用残比較期間）<br><span style="color:var(--sub)">用于与信用残方向做四象限判断</span>'
+      : '<span class="na">行情数据不足（比較期間の株価が得られません）</span>',
     bar: '',
   });
 
@@ -1886,7 +2063,7 @@ function renderIndicators(d){
   $('quadBox').innerHTML =
     '<div class="quad" style="border-color:'+qc+'">'+
       '<div class="t" style="color:'+qc+'">'+q.label+'</div>'+
-      '<div class="n">📉 株価 '+(q.priceChg>0?'+':'')+q.priceChg+'%　'+
+      '<div class="n">📉 期間株価 '+(q.priceChg>0?'+':'')+q.priceChg+'%　'+
         '📈 信用買残 '+(q.buyChg>0?'+':'')+q.buyChg+'%</div>'+
       '<div class="d">'+q.text+'</div>'+
     '</div>';
@@ -1992,6 +2169,12 @@ function renderVerdict(d){
     '<div class="vwhy">'+
       '<div class="whyHd">【方向スコアの入力 — 与 PER/PBR 无关】</div>'+
       (dItems || '<div class="r" style="border-color:var(--sub)">方向规则未触发。</div>')+
+      /* ★ A1：「売残が極めて少ない」等只解释事实、不给方向加分的说明。
+         仍然展示，但明确标注 ±0 —— 避免用户误以为它推动了结论。*/
+      ((a.dirNotes && a.dirNotes.length)
+        ? '<div class="whyHd" style="margin-top:8px">【事実の説明のみ — 方向スコアには加点しません】</div>'+
+          a.dirNotes.map(h => noteRow(h.text)).join('')
+        : '')+
       '<div class="whyHd" style="margin-top:8px">【信用リスクの入力 — 与 PER/PBR 无关】</div>'+
       (rItems || '<div class="r" style="border-color:var(--sub)">风险规则未触发。</div>')+
       '<div class="whyHd" style="margin-top:8px">【除外された估值信号 — 不计入以上任何分数】</div>'+

@@ -34,7 +34,12 @@ function mkInd(o = {}) {
   const bl = Object.assign(
     { buyListed: 1.0, sellListed: 0.01, shares: 1e8, sharesSource: 'Ganan 発行済株式数',
       buyListedJpx: 1.1, sellListedJpx: 0.01, denomStable: true, denomNote: null,
-      impliedListedShares: 1e8, note: null },
+      impliedListedShares: 1e8, note: null,
+      // ★ A1：默认 fixture 的 denomStable=true 且分母来自 Ganan 発行済株式数
+      //   → 属**可信**分母。必须显式给出，否则 creditPosition 会按
+      //   「分母可信度未知」fail-closed 把発行済比排除掉（契约要求如此）。
+      denominator: { confidence: 'high', usableAsHardTrigger: true,
+                     value: 1e8, type: '発行済株式数' } },
     o.borrowRate || {});
   const q = Object.assign(
     { key: 'strong', label: '🟢 強い / 健全', level: 'ok', color: '#22c55e',
@@ -158,6 +163,17 @@ console.log('\n=== D. creditPosition 三档 ===');
   ok('2.0日 / 5%   → 普通', norm.label === '普通', norm.label);
   ok('7.0日 / 2%   → 重い', heavy.label === '重い', heavy.label);
   ok('0.3日 / 25%  → 重い（比值触发）', heavy2.label === '重い', heavy2.label);
+
+  /* ★ A1：同一个「0.3日 / 25%」，但分母不可信 →
+     発行済比 只展示不判定，仓位由**可靠的**消化日数决定 → 軽い。
+     （若连消化日数都没有，则必须是 判定不能，见 test_credit_validity_gate D 段）*/
+  const heavyLow = MA2.creditPosition(mkInd({ digest: { days: 0.3 },
+    borrowRate: { buyListed: 25,
+      denominator: { confidence: 'low', usableAsHardTrigger: false } } }));
+  ok('0.3日 / 25% 但分母不可信 → 軽い（由可靠消化日数决定）',
+     heavyLow.label === '軽い', heavyLow.label);
+  ok('同上 basis 标注比值未用于判定', /判定に未使用/.test(heavyLow.basis), heavyLow.basis);
+
   ok('position 只输出文字档位，不含数字分数',
      !/\d+\s*\/\s*100/.test(light.label + norm.label + heavy.label));
   ok('position 带可追溯依据',

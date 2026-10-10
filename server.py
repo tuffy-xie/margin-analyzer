@@ -79,24 +79,32 @@ def mem_get(key):
         return MEM.get(key)
 
 
-def mem_set(key, rows, generation=None):
+def mem_set(key, rows, generation=None, stale=None):
     """写入进程缓存。
 
     ★ issue 7：refresh 与普通请求并行时，**旧请求不能覆盖新缓存**。
     做法：为每次写入附带 generation（单调递增的时间戳），
     只有 generation >= 已记录的 generation 才允许写入。
+
+    ★ A3.2.5（MEM / MEM_STALE 一致性）：stale 状态必须与数据**同一次写入、
+    同一把锁**内更新。若像旧实现那样在 mem_set 返回后才写 MEM_STALE，
+    并发下会出现「MEM 是线程 B 的新数据、MEM_STALE 却是线程 A 的旧状态」
+    的不同步；把两者绑在一次临界区内即可彻底避免（写入被拒绝时 stale 也不动）。
     """
     with MEM_GUARD:
         cur = MEM_META.get(key)
         if generation is not None and cur is not None and generation < cur:
-            return False        # 旧请求，放弃写入
+            return False        # 旧请求，放弃写入（数据 + stale 都不动）
         MEM[key] = rows
         if generation is not None:
             MEM_META[key] = generation
+        if stale is not None:
+            MEM_STALE[key] = bool(stale)
         return True
 
 
 MEM_META = {}   # key -> generation
+MEM_STALE = {}  # key -> bool：该缓存数据是否处于降级/stale 状态（★ A3.2：stale 贯穿内存缓存）
 MEM_GEN = [0]   # 单调递增计数器
 
 
@@ -636,6 +644,12 @@ def gather(code, days=20, fresh=False):
     ★ issue 7：空结果 / 失败结果**不写入** MEM，避免把失败当成功缓存。
     ★ issue 12：上游索引一轮 refresh 只抓一次（见 upstream_index）；
       命中进程缓存时完全不触碰上游，upstream_meta 为 None。
+
+    ★ A3.2（stale 贯穿内存缓存）：进程缓存命中时，必须沿用上次已知的
+      上游降级状态（stale），绝不可因为「命中缓存、这次没打上游」就悄悄把
+      stale 变回 False。只有一次**成功**的上游刷新（up.stale=False）才允许
+      把 MEM_STALE 复位。否则「上游失败→返回旧缓存(stale=True)」之后，
+      下一次命中同一缓存会变成 stale=False，伪装成最新。
     """
     key = f"{code}:{days}"
     gen = next_gen()
@@ -643,7 +657,10 @@ def gather(code, days=20, fresh=False):
     if not fresh:
         hit = mem_get(key)
         if hit is not None:
-            return hit, None          # 进程缓存命中：零上游开销
+            stale = MEM_STALE.get(key, False)
+            up = {"gen": MEM_META.get(key, 0), "fetched": False, "reused": True,
+                  "age": 0.0, "error": None, "stale": stale}
+            return hit, up          # 进程缓存命中：零上游开销，stale 状态保留
 
     avail, up = upstream_index(fresh=fresh, limit=max(days, 12))
     rows = []
@@ -656,9 +673,11 @@ def gather(code, days=20, fresh=False):
 
     rows.sort(key=lambda x: x["date"])
 
-    # 只有拿到数据才写进程缓存；空结果不入 MEM（下次会重试）
+    # 只有拿到数据才写进程缓存；空结果不入 MEM（下次会重试）。
+    # 同时记录本次上游降级状态，供后续缓存命中沿用（stale 贯穿内存缓存）。
     if rows:
-        mem_set(key, rows, generation=gen)
+        # ★ A3.2.5：stale 与数据原子写入（详见 mem_set 注释）
+        mem_set(key, rows, generation=gen, stale=bool(up.get("stale")))
     return rows, up
 
 
@@ -740,12 +759,14 @@ class H(BaseHTTPRequestHandler):
             fresh = (q.get("fresh", ["0"])[0] or "0").lower() in ("1", "true", "yes")
             try:
                 # 复用现有 JPX 日次抓取/缓存链，得到日次记录
-                daily_rows, _up = gather(code, UPSTREAM_LIMIT, fresh=fresh)
+                # ★ A3.2：保留 upstream_meta（含 stale 状态），透传给 weekly 响应，
+                #   否则週次响应会丢失 stale/source/dataAsOf 等字段（Issue B/D）。
+                daily_rows, up = gather(code, UPSTREAM_LIMIT, fresh=fresh)
             except Exception as e:
                 self._send({"ok": False, "err": f"JPX 日次抓取失败: {e}"}, 500)
                 return
             try:
-                resp = weekly.build_weekly_response(code, daily_rows, fresh=fresh)
+                resp = weekly.build_weekly_response(code, daily_rows, fresh=fresh, upstream=up)
             except Exception as e:
                 self._send({"ok": False, "err": f"周次计算失败: {e}"}, 500)
                 return
@@ -795,6 +816,17 @@ class H(BaseHTTPRequestHandler):
                 "rows": rows,
                 "count": len(rows),
                 "latest": rows[-1]["date"] if rows else None,
+                # ★ A3.2.5 §6：与 /api/weekly 对齐，日次也如实给出数据状态字段。
+                #   · dataAsOf             = 数据所属公表日（与 latest 一致）
+                #   · lastSuccessfulUpdate = 上次**成功**更新的时刻；
+                #                            上游刷新失败（stale）时为 None，
+                #                            绝不把旧缓存伪装成刚刚更新过。
+                #   注意：两个 API 的日期**可以不同**（週次 13W 比日次慢），
+                #   这是正常的；但两者的 stale / lastSuccessfulUpdate 必须如实。
+                "dataAsOf": rows[-1]["date"] if rows else None,
+                "lastSuccessfulUpdate": (
+                    None if stale
+                    else datetime.datetime.now().isoformat(timespec="seconds")),
                 "fresh": fresh,
                 # freshServed：这份数据是否真的来自一次成功的上游刷新。
                 # fresh=1 但上游失败 → False（前端必须提示降级，不能显示「已刷新」）。
