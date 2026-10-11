@@ -890,9 +890,27 @@ const DIR_RULES = [
   { id: 'q-chase', w: 14, zone: 'dn',
     test: (i) => i.quadrant.key === 'chasing',
     why: (i) => `股价 ${i.quadrant.priceChg}% 上涨伴随買残 ${i.quadrant.buyChg}%，上涨质量存疑。` },
-  { id: 'short-squeeze', w: 26, zone: 'up',
+  /* ★ A1（2026-10-09）：「売残が極めて少ない」**不再**作为正向方向加分。
+     ------------------------------------------------------------------
+     原实现：`short-squeeze w:26 zone:'up'`，仅凭「倍率≥8 且倍率主因=売残极少」
+     就给 +26 方向分。问题在于这两个条件**只依赖信用残 rows 自身** ——
+     株価・出来高・発行済株式数全部缺失时依然会触发，于是出现
+     「四象限=判定不能 / 消化日数=null / position=判定不能」的股票
+     却拿到 dir=26 → 🟢 短期信用需給：改善（案例 A 已复现）。
+
+     语义纠正：「売残が少ない」只能解释**倍率为什么偏高**（这个解释职责
+     已由 decomposeRatio 的 cause='shortTiny' / causeText 承担），
+     它不能推导出「軋空余力」「回补燃料」或「方向偏多」——
+     信用売残并不等于市场全部空头头寸。
+
+     现在改为 soft：保留为事实说明（详细页「この判定になった理由」可见），
+     w=0，不进入 directionScore，也不得单独推动 creditVerdict 的 改善。*/
+  { id: 'short-squeeze', w: 0, zone: 'up', soft: true,
     test: (i) => i.ratioDecomp.cause === 'shortTiny' && i.ratio.value != null && i.ratio.value >= 8,
-    why: (i) => `倍率 ${i.ratio.value}倍 主要来自「売残极少」而非買残堆积，軋空（ショートカバー）余力相对存在。` },
+    why: (i) => `倍率 ${i.ratio.value}倍 は「売残が極めて少ない」ため高く見えています。` +
+                `売残の少なさは倍率の高さを説明する**事実**であり、` +
+                `ショートカバー余地・方向の強気を示す根拠にはなりません` +
+                `（方向スコアには加点していません）。` },
   // ⚠ 这里**刻意没有** per-high（PER）与 div-good（配当利回り）。
   // 两者都是「企業・バリュエーション」维度，混进信用需給评分会造成概念混淆：
   // 「信用筹码健康 + 估值偏高」不应该被表述为「短期需給弱気」。
@@ -911,7 +929,7 @@ const VALUATION_SIGNALS = [
 ];
 
 function runRules(ind, val) {
-  const rHits = [], dHits = [], rNotes = [];
+  const rHits = [], dHits = [], rNotes = [], dNotes = [];
   for (const r of RISK_RULES) {
     let ok = false;
     try { ok = !!r.test(ind, val); } catch (e) { ok = false; }
@@ -923,7 +941,10 @@ function runRules(ind, val) {
   for (const r of DIR_RULES) {
     let ok = false;
     try { ok = !!r.test(ind, val); } catch (e) { ok = false; }
-    if (ok) dHits.push({ ...r, whyText: r.why(ind, val) });
+    if (!ok) continue;
+    const item = { ...r, whyText: r.why(ind, val) };
+    // soft 方向规则（如「売残极少」）只作为事实说明记录，**不参与方向加总**
+    if (r.soft) { dNotes.push(item); } else { dHits.push(item); }
   }
 
   /* 信用风险分 0~100，越高越紧张（只累加非 soft 规则） */
@@ -948,6 +969,7 @@ function runRules(ind, val) {
     risk, riskLabel, riskColor, riskHits: rHits,
     riskNotes: rNotes,          // soft：仅提示，不计分
     dir, dirLabel, dirColor, dirHits: dHits,
+    dirNotes: dNotes,           // ★ A1：soft 方向说明（売残极少等），不计入 dir
     quadrant: ind.quadrant,
   };
 }
@@ -979,16 +1001,36 @@ const GRADES = {
  */
 function creditPosition(ind) {
   const dg = ind.digest, bl = ind.borrowRate;
+  const denom = (bl && bl.denominator) || null;
+  /* ★ A1（2026-10-09）：仓位轻重必须服从分母可信度契约。
+     ------------------------------------------------------------------
+     此前 creditPosition 无条件读取 bl.buyListed，是本文件里唯一一个
+     **没有**做分母门禁的仓位判断点 —— RISK_RULES['listed-high'] 与
+     creditVerdict 的 listedHeavy 都已经用 usableAsHardTrigger 守住了，
+     唯独这里漏了，于是出现案例 B：
+       消化日数 0.20 日（极轻） + 低可信分母算出的発行済比 10%
+       → 分母不可信、grade 正确地停在 中立，但 position 却显示 重い。
+     现在复用**同一个**契约（不新造第二套 confidence 规则）：
+       confidence ∈ {high, unverified} → 可参与 hard 判定
+       confidence ∈ {low, na}          → 只展示，不决定 重い/軽い */
+  const denomTrusted = !!(denom && denom.usableAsHardTrigger);
   const d = dg && dg.days != null ? dg.days : null;
-  const p = bl && bl.buyListed != null ? bl.buyListed : null;
+  const pRaw = bl && bl.buyListed != null ? bl.buyListed : null;
+  const p = denomTrusted ? pRaw : null;          // 分母不可信 → 不参与判定
+  const pExcluded = (pRaw != null && !denomTrusted);
 
   /* ★ fail-safe（issue 4）：
      原则「没有发现风险 ≠ 已证明仓位轻」。
-     当两个尺度都拿不到时，**必须**返回 unknown，
-     绝不能落到 else 分支输出绿色「軽い」。*/
+     当**可靠的**尺度一个都拿不到时，**必须**返回 unknown，
+     绝不能落到 else 分支输出绿色「軽い」。
+     ★ A1 补充：分母不可信导致的 p=null 也算「没有可靠尺度」，
+     不得拿被排除的估算值去凑一个 重い/軽い 出来。*/
   if (d == null && p == null) {
+    const why = (d == null && pRaw == null)
+      ? '消化日数・発行済比 いずれも算出できず'
+      : '消化日数 算出できず、発行済比 は分母可信度不足のため判定に未使用';
     return { key: 'unknown', label: '判定不能', color: '#8b96ad',
-             basis: '消化日数・発行済比 いずれも算出できず', unknown: true };
+             basis: why, unknown: true };
   }
 
   let key, label, color;
@@ -1001,7 +1043,9 @@ function creditPosition(ind) {
   if (p != null) basis.push('発行済比 ' + p.toFixed(2) + '%');
   // 部分缺失要如实说明，不能让用户以为两个尺度都验证过
   if (d == null) basis.push('消化日数 不明');
-  if (p == null) basis.push('発行済比 不明');
+  // 被分母门禁排除的估算值：展示出来，但明确标注「未用于判定」
+  if (p == null && pExcluded) basis.push('発行済比 ' + pRaw.toFixed(2) + '%（分母可信度不足・判定に未使用）');
+  else if (p == null) basis.push('発行済比 不明');
   return { key, label, color, basis: basis.join(' / '), unknown: false };
 }
 
@@ -1032,6 +1076,21 @@ function creditVerdict(ind, vr) {
      这是一票否决（fail-safe）：宁可 unknown，不输出虚假变化。*/
   const caAffected = !!ind.corporateActionAffected;
 
+  /* ★ A1（2026-10-09）：数据有效性门槛 —— 「证据不足」不得被包装成好消息。
+     ------------------------------------------------------------------
+     四象限（株価 × 信用買残方向）判不出来时，说明「方向」这件事根本没有
+     可信输入，此时**不得**输出 🟢改善 或「方向スコア xx（需給の改善傾向）」
+     这类肯定结论（案例 A 已复现：quadrant=unknown / digest=null /
+     position=判定不能，却因历史遗留的 short-squeeze +26 拿到 dir=26 → 🟢改善）。
+
+     ★ 这不是「unknown = 悪化」：
+       风险侧的 hard 结论（消化日数过重 / 下落中買残増加 / 買残急騰 / リスク偏高）
+       依然照常输出 —— 那些结论依赖的数据本身是可靠的，隐藏真实风险更糟。
+       本门槛只拦「拿不出正面证据却给出正面结论」这一种情况。
+
+     ★ 措辞遵循产品既有语义：证据不足 → 既有档位「判定不能」（GRADES.unknown）。*/
+  const quadrantKnown = (q && q.key !== 'unknown' && q.key !== 'corporateAction');
+
   let g, reasonCode = '', reasonFacts = [];
 
   if (caAffected) {
@@ -1054,15 +1113,35 @@ function creditVerdict(ind, vr) {
   } else if (surging || dir < -20 || risk >= 55) {
     g = GRADES.warn; reasonCode = 'caution';
     if (surging)   reasonFacts.push('短期買残の急騰（' + ind.long.chgN + '%）');
-    if (dir < -20) reasonFacts.push('方向スコアが弱気優勢（' + dir + '）');
-    if (risk >= 55) reasonFacts.push('信用リスク偏高（' + risk + '）');
-  } else if (dir >= 10 && risk < 45 && !absHeavy) {
+    /* ★ A4.3：reasonFacts 会被首页 Hero 直接渲染 —— **禁止**写入内部评分裸数字
+       （方向スコア / 信用リスク 的 0~100 数值）。首页只做定性解释；
+       数值本身保留在详细页「判定ロジック」折叠区的 verdictAudit（dir / risk）。*/
+    if (dir < -20) reasonFacts.push('需給の方向が弱気優勢');
+    if (risk >= 55) reasonFacts.push('信用需給リスクが偏高');
+  } else if (!quadrantKnown) {
+    /* 四象限判不出来 → 方向结论无从谈起。
+       放在 bad / warn 之后：若已有可靠的负面 hard 依据，那些结论优先保留，
+       不因为「方向判不出来」就把已确认的风险也一起抹成 判定不能。*/
+    g = GRADES.unknown; reasonCode = 'insufficientData';
+    reasonFacts = [
+      '株価または出来高データが不足しているため、短期需給の方向は判定できません。',
+      (q && q.text) || '四象限（株価 × 信用買残）を判定できません。',
+    ];
+    /* ★ 但「方向判不出来」不等于「什么都没发生」。
+       已确认的可靠事实（買残急騰・消化日数等）必须继续透出，
+       否则用户会以为「无数据」而漏掉真实存在的信号。
+       注意：只透出**事实原文**，不改变等级，也不做方向性结论。*/
+    if (vr && Array.isArray(vr.riskHits)) {
+      vr.riskHits.forEach(function (h) { if (h.whyText) reasonFacts.push(h.whyText); });
+    }
+  } else if (quadrantKnown && dir >= 10 && risk < 45 && !absHeavy) {
     g = GRADES.good; reasonCode = 'improving';
-    // 文案必须与实际分数方向一致（此前误写成「弱気優勢」，与 grade 矛盾）
-    reasonFacts.push('方向スコア ' + dir + '（需給の改善傾向）');
+    // 定性表述：此前此处写入 '方向スコア ' + dir 的裸数字，会泄漏到首页。
+    reasonFacts.push('需給の方向が改善傾向');
   } else {
     g = GRADES.mid; reasonCode = 'neutral';
-    reasonFacts.push('方向スコア ' + dir + ' ／ 信用リスク ' + risk + '（中性圏）');
+    // 同上：改为定性表述，裸分数仅在详细页审计区保留。
+    reasonFacts.push('需給の方向・リスクともに中性圏');
   }
 
   // 分母不可信时补充说明（不改变等级，但必须让用户看到）
@@ -1090,6 +1169,11 @@ function creditVerdict(ind, vr) {
        否则会出现「徽章悪化 / 文案改善傾向」这类自相矛盾。*/
     reasonCode: reasonCode,
     reasonFacts: reasonFacts,
+    /* ★ A4.3：内部评分**不再**经 reasonFacts 泄漏到首页。
+       若将来有合法场景需要数值，只能从这里取（供详细页审计/调试），
+       首页渲染路径严禁读取 dirScore / riskScore。*/
+    dirScore: vr.dir,
+    riskScore: vr.risk,
     comparison: ind.comparison || null,
     corporateActionAffected: caAffected,
     corporateActionStatus: ind.corporateActionStatus || 'none',
@@ -1117,12 +1201,17 @@ function verdictAudit(ind, vr, val) {
   const noteItems = (vr.riskNotes || []).map(function (h) {
     return { id: h.id, w: 0, text: h.whyText, soft: true };
   });
+  /* ★ A1：方向侧 soft 说明（売残极少 等 —— 只解释事实，不给方向加分）*/
+  const dirNoteItems = (vr.dirNotes || []).map(function (h) {
+    return { id: h.id, w: 0, zone: h.zone, text: h.whyText, soft: true };
+  });
 
   return {
     dir: vr.dir, dirLabel: vr.dirLabel, dirColor: vr.dirColor,
     risk: vr.risk, riskLabel: vr.riskLabel, riskColor: vr.riskColor,
     dirItems: dItems, riskItems: rItems,
     riskNotes: noteItems,          // soft：分母不可信等「仅提示不计分」的规则
+    dirNotes: dirNoteItems,        // ★ A1：方向侧「仅说明不计分」的规则
     valuationExcluded: valHits,
     quadrant: ind.quadrant,
     comparison: ind.comparison || null,

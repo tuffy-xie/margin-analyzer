@@ -4,11 +4,26 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import server
 
-# 固定夹具日期；JPX PDF 属于本地缓存，不随仓库分发。
-PDF = Path(__file__).resolve().parent / '.cache' / '20261002_mtall.pdf'
+# 固定夹具日期；JPX PDF 属于本地缓存（17MB+ / 单份 1.7MB），**不随仓库分发**。
+#
+# ★ A4.3 §3：不得把「缺夹具造成的 SKIP」算作 PASS。
+#   旧实现在此处直接 sys.exit(0)，CI 会把"根本没跑"当成"通过"。
+#   现在改为：打印机器可读的 SKIP 标记，并用**专用退出码 77** 与
+#   PASS(0) / FAIL(1) 明确区分。
+#
+# 最小可复现方案（任选其一）：
+#   1) 环境变量指向任意一份 JPX 官方 PDF：
+#        JPX_PDF=/path/to/YYYYMMDD_mtall.pdf python test_parse.py
+#   2) 让本地服务抓过一次后复用缓存：
+#        python server.py 8848   然后浏览器查任意日次代码 → .cache/ 下即生成 PDF
+PDF = Path(os.environ.get('JPX_PDF')
+           or (Path(__file__).resolve().parent / '.cache' / '20261002_mtall.pdf'))
 if not PDF.is_file():
-    print('SKIP: 解析测试需要本地 .cache/20261002_mtall.pdf，当前目录未提供。')
-    sys.exit(0)
+    print('RESULT: SKIPPED (缺夹具 JPX PDF)')
+    print('SKIP: 解析测试需要一份 JPX 官方 PDF；')
+    print('      设置 JPX_PDF=<path> 或让本地服务抓取一次生成 .cache/20261002_mtall.pdf。')
+    print('      注意：SKIP **不计为通过**（退出码 77，区别于 PASS 的 0）。')
+    sys.exit(77)
 PDF = str(PDF)
 day = '20261002'
 print(f'测试日: {day}, 文件: {os.path.basename(PDF)}')
@@ -65,5 +80,5 @@ if r:
 else:
     ok('未找到' in str(e) or 'PDF' in str(e), '13990 安全返回"未找到"（不串标）', e)
 
-print(f'\n结果：{pass_n} 通过，{fail_n} 失败')
+print(f'\n结果：{pass_n} 通过，{fail_n} 失败，0 跳过')
 sys.exit(1 if fail_n else 0)

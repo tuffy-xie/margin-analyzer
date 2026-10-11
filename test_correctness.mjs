@@ -330,9 +330,23 @@ console.log('\n=== D. digest=null 且 buyListed=null → unknown ===');
   ok(onlyDigest.key === 'light', '仅 digest 可用 → light', onlyDigest.key);
   ok(/発行済比 不明/.test(onlyDigest.basis), 'basis 标明 発行済比 不明', onlyDigest.basis);
 
-  const onlyListed = MA2.creditPosition({ digest: { days: null }, borrowRate: { buyListed: 12 } });
-  ok(onlyListed.key === 'heavy', '仅 発行済比 可用且 ≥10% → heavy', onlyListed.key);
+  /* ★ A1：発行済比 要参与仓位判定，分母必须**可信**。
+     旧 fixture 未声明分母来源，隐含假设比值可信；新契约要求显式给出。*/
+  const TRUSTED   = { confidence: 'high', usableAsHardTrigger: true };
+  const UNTRUSTED = { confidence: 'low',  usableAsHardTrigger: false };
+
+  const onlyListed = MA2.creditPosition({ digest: { days: null },
+    borrowRate: { buyListed: 12, denominator: TRUSTED } });
+  ok(onlyListed.key === 'heavy', '仅 発行済比 可用且 ≥10%（分母可信）→ heavy', onlyListed.key);
   ok(/消化日数 不明/.test(onlyListed.basis), 'basis 标明 消化日数 不明', onlyListed.basis);
+
+  // ★ A1：同一个 12%，但分母不可信 → 不得判 heavy，也绝不能退而求其次判 軽い
+  const lowListed = MA2.creditPosition({ digest: { days: null },
+    borrowRate: { buyListed: 12, denominator: UNTRUSTED } });
+  ok(lowListed.key === 'unknown', '分母不可信时：仅 発行済比 可用 → 判定不能', lowListed.key);
+  ok(!/重い/.test(lowListed.label) && !/軽い/.test(lowListed.label),
+     '分母不可信时不得输出 重い / 軽い', lowListed.label);
+  ok(/分母可信度不足/.test(lowListed.basis), 'basis 说明分母未用于判定', lowListed.basis);
 
   // GRADES 必须有 unknown，且不是绿色
   ok(MA2.GRADES.unknown != null, 'GRADES.unknown 存在');
